@@ -98,6 +98,7 @@ function switchView(viewId) {
   switch(viewId) {
     case 'daily': renderDaily(view); break;
     case 'customers': renderCustomers(view); break;
+    case 'consumption': renderConsumption(view); break;
     case 'skin': renderKnowledge(view, SKIN_DATA, '皮肤专业知识'); break;
     case 'photoelectric': renderKnowledge(view, PHOTO_DATA, '光电专业知识'); break;
     case 'waterlight': renderKnowledge(view, WATER_DATA, '水光产品知识'); break;
@@ -1032,25 +1033,65 @@ const PRIORITY = {
   long:   { label: '长期慢慢跟进', tag: 'long', class: 'priority-long' }
 };
 
+// 数据迁移：将旧格式转换为新格式（多项目归集）
+function migrateCustomers(customers) {
+  return customers.map(c => {
+    if (!c.projects) {
+      c.projects = [];
+      if (c.project) {
+        c.projects.push({
+          id: 'p' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+          name: c.project,
+          thought: c.thought || '',
+          date: c.createdAt || formatDate(new Date()),
+          completed: c.completed || false
+        });
+      }
+      delete c.project;
+      delete c.thought;
+    }
+    if (!c.entries) c.entries = [];
+    return c;
+  });
+}
+
+let custSearchKeyword = '';
+
 function renderCustomers(view) {
-  const customers = Store.get('customers', []);
+  let customers = Store.get('customers', []);
+  customers = migrateCustomers(customers);
+  Store.set('customers', customers);
+
+  // 搜索过滤
+  const keyword = custSearchKeyword.toLowerCase().trim();
+  let filtered = customers;
+  if (keyword) {
+    filtered = customers.filter(c => {
+      if (c.name.toLowerCase().includes(keyword)) return true;
+      if (c.projects && c.projects.some(p => p.name.toLowerCase().includes(keyword))) return true;
+      if (c.followups && c.followups.some(f => f.content.toLowerCase().includes(keyword))) return true;
+      return false;
+    });
+  }
 
   // 统计
-  const active = customers.filter(c => !c.completed);
+  const active = filtered.filter(c => !c.completed);
   const urgentCount = active.filter(c => c.priority === 'urgent').length;
   const monthCount  = active.filter(c => c.priority === 'month').length;
   const longCount   = active.filter(c => c.priority === 'long').length;
-  const doneCount   = customers.filter(c => c.completed).length;
+  const doneCount   = filtered.filter(c => c.completed).length;
 
-  // 检查是否有到期回访
-  const today = new Date();
-  const todayStr = formatDate(today);
+  // 检查到期回访
+  const todayStr = formatDate(new Date());
   let overdueCount = 0;
   active.forEach(c => {
     if (c.revisitDate && c.revisitDate <= todayStr) overdueCount++;
   });
 
   let html = `
+    <div class="cust-search-bar">
+      <input class="cust-search-input" id="custSearch" placeholder="🔍 搜索顾客姓名/项目名称/跟进内容..." value="${custSearchKeyword}" oninput="onCustSearch(this.value)">
+    </div>
     <div class="cust-stats">
       <div class="cust-stat-card">
         <div class="cust-stat-num red">${urgentCount}</div>
@@ -1076,54 +1117,68 @@ function renderCustomers(view) {
     `;
   }
 
-  // 添加按钮
   html += `
     <button class="btn btn-primary btn-full" onclick="showAddCustomer()" style="margin-bottom:14px;">
       ➕ 新增顾客跟进
     </button>
   `;
 
-  // 待跟进列表
-  html += `<div class="section-title">待跟进顾客 (${active.length})</div>`;
-  if (active.length === 0) {
-    html += `<div class="empty-state"><div class="es-icon">👥</div><div class="es-text">还没有待跟进的顾客，点击上方按钮添加</div></div>`;
+  if (keyword) {
+    html += `<div class="section-title">搜索结果 (${filtered.length})</div>`;
   } else {
-    // 按优先级排序：紧急 > 1个月 > 长期
+    html += `<div class="section-title">待跟进顾客 (${active.length})</div>`;
+  }
+
+  if (filtered.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">👥</div><div class="es-text">${keyword ? '没有找到匹配的顾客' : '还没有待跟进的顾客，点击上方按钮添加'}</div></div>`;
+  } else {
+    // 按优先级排序
     const order = { urgent: 0, month: 1, long: 2 };
     active.sort((a, b) => (order[a.priority] || 2) - (order[b.priority] || 2));
     html += active.map(c => renderCustomerItem(c)).join('');
   }
 
   // 已完成列表
-  if (doneCount > 0) {
+  if (doneCount > 0 && !keyword) {
     html += `<div class="cust-done-section">`;
     html += `<div class="cust-done-header">✅ 已完成/已成交 (${doneCount})</div>`;
-    html += customers.filter(c => c.completed).map(c => renderCustomerItem(c)).join('');
+    html += filtered.filter(c => c.completed).map(c => renderCustomerItem(c)).join('');
     html += `</div>`;
   }
 
   view.innerHTML = html;
 }
 
+function onCustSearch(val) {
+  custSearchKeyword = val;
+  const view = document.getElementById('view-customers');
+  if (view) renderCustomers(view);
+}
+
 function renderCustomerItem(c) {
   const p = PRIORITY[c.priority] || PRIORITY.long;
   const isOverdue = c.revisitDate && c.revisitDate <= formatDate(new Date()) && !c.completed;
 
-  let followupHtml = '';
-  if (c.followups && c.followups.length > 0) {
-    followupHtml = '<div class="cust-followups">';
-    c.followups.slice().reverse().forEach(f => {
-      followupHtml += `
-        <div class="cust-followup-item">
-          <span class="cust-followup-date">${f.date}</span> ${f.content}
-        </div>
-      `;
+  // 项目标签
+  let projectTagsHtml = '';
+  if (c.projects && c.projects.length > 0) {
+    projectTagsHtml = '<div class="cust-project-tags">';
+    c.projects.forEach(proj => {
+      projectTagsHtml += `<span class="cust-project-tag ${proj.completed ? 'done' : ''}">${proj.name}</span>`;
     });
-    followupHtml += '</div>';
+    projectTagsHtml += '</div>';
+  }
+
+  // 最新动态
+  let latestActivity = '';
+  const allEntries = getAllEntries(c);
+  if (allEntries.length > 0) {
+    const latest = allEntries[0]; // already sorted newest first
+    latestActivity = `<div class="cust-latest-activity"><span class="cla-label">${latest.typeLabel}</span> ${latest.date}：${latest.summary}</div>`;
   }
 
   return `
-    <div class="cust-item ${c.completed ? 'completed' : p.class}">
+    <div class="cust-item ${c.completed ? 'completed' : p.class}" onclick="showCustomerDetail('${c.id}')">
       <div class="cust-item-header">
         <div class="cust-name">${c.name}</div>
         ${c.completed
@@ -1131,17 +1186,126 @@ function renderCustomerItem(c) {
           : `<span class="cust-priority-tag ${p.tag}">${p.label}</span>`
         }
       </div>
-      ${c.project ? `<div class="cust-field"><span class="cust-field-label">铺垫项目：</span>${c.project}</div>` : ''}
-      ${c.thought ? `<div class="cust-field"><span class="cust-field-label">顾客想法：</span>${c.thought}</div>` : ''}
-      ${followupHtml}
+      ${c.contact ? `<div class="cust-field"><span class="cust-field-label">联系方式：</span>${c.contact}</div>` : ''}
+      ${projectTagsHtml}
+      ${latestActivity}
       ${c.revisitDate ? `<div class="cust-revisit-date ${isOverdue ? 'overdue' : ''}">📅 回访时间：${c.revisitDate}${isOverdue ? ' ⚠已到期' : ''}</div>` : ''}
-      <div class="cust-actions">
+      <div class="cust-actions" onclick="event.stopPropagation()">
         ${!c.completed ? `<button class="cust-action-btn" onclick="showAddFollowup('${c.id}')">💬 记跟进</button>` : ''}
+        ${!c.completed ? `<button class="cust-action-btn" onclick="showAddProject('${c.id}')">📌 新增项目</button>` : ''}
+        <button class="cust-action-btn" onclick="showCustomerDetail('${c.id}')">📋 详情</button>
         <button class="cust-action-btn" onclick="showEditCustomer('${c.id}')">✏️ 编辑</button>
         ${!c.completed ? `<button class="cust-action-btn success" onclick="toggleCustomerDone('${c.id}')">✅ 完成成交</button>` : ''}
         ${c.completed ? `<button class="cust-action-btn" onclick="toggleCustomerDone('${c.id}')">↩️ 恢复跟进</button>` : ''}
         <button class="cust-action-btn danger" onclick="deleteCustomer('${c.id}')">🗑 删除</button>
       </div>
+    </div>
+  `;
+}
+
+// 获取顾客所有记录条目（项目+跟进），按时间倒序排列
+function getAllEntries(c) {
+  const entries = [];
+  if (c.projects) {
+    c.projects.forEach(p => {
+      entries.push({
+        id: p.id,
+        type: 'project',
+        typeLabel: '📌 项目铺垫',
+        date: p.date || '',
+        summary: p.name + (p.thought ? ' - ' + p.thought : ''),
+        projectName: p.name,
+        thought: p.thought,
+        completed: p.completed,
+        sortDate: p.date || ''
+      });
+    });
+  }
+  if (c.followups) {
+    c.followups.forEach(f => {
+      const proj = c.projects ? c.projects.find(p => p.id === f.projectId) : null;
+      entries.push({
+        id: f.id || ('f' + f.date),
+        type: 'followup',
+        typeLabel: '💬 跟进记录',
+        date: f.date || '',
+        summary: f.content + (proj ? ' [' + proj.name + ']' : ''),
+        content: f.content,
+        projectName: proj ? proj.name : '',
+        revisitDate: f.revisitDate || '',
+        completed: false,
+        sortDate: f.date || ''
+      });
+    });
+  }
+  // 按日期倒序排列
+  entries.sort((a, b) => (b.sortDate || '').localeCompare(a.sortDate || ''));
+  return entries;
+}
+
+// 顾客详情（时间线视图）
+function showCustomerDetail(cid) {
+  let customers = Store.get('customers', []);
+  customers = migrateCustomers(customers);
+  const c = customers.find(cu => cu.id === cid);
+  if (!c) return;
+
+  const p = PRIORITY[c.priority] || PRIORITY.long;
+  const allEntries = getAllEntries(c);
+  const activeEntries = allEntries.filter(e => !e.completed);
+  const completedEntries = allEntries.filter(e => e.completed);
+
+  // 检查是否有消费记录
+  const consumption = Store.get('consumption', []);
+  const custConsumption = consumption.filter(r => r.name === c.name);
+
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">📋 ${c.name} 档案</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="margin-bottom:10px;">
+      ${c.contact ? `<div class="cust-field"><span class="cust-field-label">联系方式：</span>${c.contact}</div>` : ''}
+      <div class="cust-field"><span class="cust-field-label">优先级：</span><span class="cust-priority-tag ${p.tag}">${p.label}</span></div>
+      ${c.revisitDate ? `<div class="cust-revisit-date ${c.revisitDate <= formatDate(new Date()) && !c.completed ? 'overdue' : ''}">📅 回访时间：${c.revisitDate}${c.revisitDate <= formatDate(new Date()) && !c.completed ? ' ⚠已到期' : ''}</div>` : ''}
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
+      ${!c.completed ? `<button class="cust-action-btn" onclick="closeModal();showAddFollowup('${c.id}')">💬 记跟进</button>` : ''}
+      ${!c.completed ? `<button class="cust-action-btn" onclick="closeModal();showAddProject('${c.id}')">📌 新增项目</button>` : ''}
+      ${custConsumption.length > 0 ? `<button class="cust-cross-link" onclick="closeModal();switchView('consumption');setTimeout(()=>{document.getElementById('consumptionSearch').value='${c.name}';onConsumptionSearch('${c.name}');},100)">💳 查看消费记录(${custConsumption.length})</button>` : ''}
+      <button class="cust-cross-link" onclick="closeModal();switchView('consumption');setTimeout(()=>{document.getElementById('consumptionSearch').value='${c.name}';onConsumptionSearch('${c.name}');},100)">💳 消费管理</button>
+    </div>
+  `;
+
+  // 时间线
+  html += `<div class="section-title">沟通全周期轨迹 (${allEntries.length})</div>`;
+  html += `<div class="cust-timeline">`;
+  if (activeEntries.length === 0 && completedEntries.length === 0) {
+    html += `<div style="text-align:center;padding:20px;color:var(--text-light);font-size:13px;">暂无记录，点击上方按钮新增项目或跟进</div>`;
+  } else {
+    activeEntries.forEach(e => {
+      html += renderTimelineEntry(e);
+    });
+    if (completedEntries.length > 0) {
+      html += `<div style="font-size:12px;color:var(--text-light);margin-top:10px;padding:4px 0;border-top:1px dashed #E0E0E0;">已完成项目</div>`;
+      completedEntries.forEach(e => {
+        html += renderTimelineEntry(e);
+      });
+    }
+  }
+  html += `</div>`;
+
+  showModal(html);
+}
+
+function renderTimelineEntry(e) {
+  return `
+    <div class="cust-timeline-entry type-${e.type} ${e.completed ? 'completed' : ''}">
+      <span class="te-type">${e.typeLabel}</span>
+      <span class="te-date">${e.date}</span>
+      ${e.projectName ? `<span class="te-project-name">[${e.projectName}]</span>` : ''}
+      <div class="te-content">${e.type === 'project' ? (e.thought || e.projectName) : e.content}</div>
+      ${e.revisitDate ? `<div style="font-size:11px;color:var(--text-light);margin-top:2px;">📅 约定回访：${e.revisitDate}</div>` : ''}
     </div>
   `;
 }
@@ -1152,9 +1316,11 @@ function showAddCustomer() {
       <div class="modal-title">新增顾客跟进</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <input class="input-field" id="custName" placeholder="顾客姓名" autofocus>
-    <input class="input-field" id="custProject" placeholder="铺垫的项目">
-    <textarea class="input-field" id="custThought" placeholder="顾客想法" rows="2"></textarea>
+    <input class="input-field" id="custName" placeholder="顾客姓名" autofocus oninput="checkCustName(this.value)">
+    <div id="custNameHint" style="font-size:12px;margin-top:-6px;margin-bottom:8px;display:none;"></div>
+    <input class="input-field" id="custContact" placeholder="联系方式（手机号/微信号）">
+    <input class="input-field" id="custProject" placeholder="铺垫项目（如：热玛吉/水光针）">
+    <textarea class="input-field" id="custThought" placeholder="顾客想法/分析" rows="2"></textarea>
     <input class="input-field" type="date" id="custRevisit" placeholder="约定回访时间">
     <div class="section-title">跟进优先级</div>
     <div class="cust-priority-selector">
@@ -1167,6 +1333,21 @@ function showAddCustomer() {
   showModal(html);
 }
 
+// 检查顾客姓名是否已存在（一人一档）
+function checkCustName(name) {
+  const hint = document.getElementById('custNameHint');
+  if (!name.trim()) { hint.style.display = 'none'; return; }
+  const customers = Store.get('customers', []);
+  const existing = customers.find(c => c.name === name.trim());
+  if (existing) {
+    hint.style.display = 'block';
+    hint.style.color = '#F44336';
+    hint.innerHTML = '⚠️ 该顾客已存在档案，新内容将归集到现有档案中';
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
 let selectedPriority = 'urgent';
 function selectPriority(el) {
   selectedPriority = el.dataset.priority;
@@ -1177,39 +1358,79 @@ function selectPriority(el) {
 function saveNewCustomer() {
   const name = document.getElementById('custName').value.trim();
   if (!name) { showToast('请输入顾客姓名'); return; }
+  const contact = document.getElementById('custContact').value.trim();
   const project = document.getElementById('custProject').value.trim();
   const thought = document.getElementById('custThought').value.trim();
   const revisitDate = document.getElementById('custRevisit').value || '';
 
   const customers = Store.get('customers', []);
-  customers.push({
-    id: 'c' + Date.now(),
-    name, project, thought, revisitDate,
-    priority: selectedPriority,
-    followups: [],
-    completed: false,
-    createdAt: formatDate(new Date())
-  });
-  Store.set('customers', customers);
-  closeModal();
-  speak('已添加顾客');
-  renderCustomers(document.getElementById('view-customers'));
+  // 一人一档：检查是否已有该顾客
+  const existingIdx = customers.findIndex(c => c.name === name);
+
+  if (existingIdx >= 0) {
+    // 归集到现有档案
+    const c = customers[existingIdx];
+    if (!c.projects) c.projects = [];
+    if (project) {
+      c.projects.push({
+        id: 'p' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+        name: project,
+        thought: thought,
+        date: formatDate(new Date()),
+        completed: false
+      });
+    }
+    if (contact) c.contact = contact;
+    if (revisitDate) c.revisitDate = revisitDate;
+    c.priority = selectedPriority;
+    c.completed = false;
+    Store.set('customers', customers);
+    closeModal();
+    speak('已归集到现有顾客档案');
+    renderCustomers(document.getElementById('view-customers'));
+  } else {
+    // 新建档案
+    const newCust = {
+      id: 'c' + Date.now(),
+      name, contact,
+      priority: selectedPriority,
+      followups: [],
+      completed: false,
+      createdAt: formatDate(new Date()),
+      revisitDate: revisitDate,
+      projects: []
+    };
+    if (project) {
+      newCust.projects.push({
+        id: 'p' + Date.now() + '_1',
+        name: project,
+        thought: thought,
+        date: formatDate(new Date()),
+        completed: false
+      });
+    }
+    customers.push(newCust);
+    Store.set('customers', customers);
+    closeModal();
+    speak('已添加顾客');
+    renderCustomers(document.getElementById('view-customers'));
+  }
 }
 
 function showEditCustomer(cid) {
-  const customers = Store.get('customers', []);
+  let customers = Store.get('customers', []);
+  customers = migrateCustomers(customers);
   const c = customers.find(cu => cu.id === cid);
   if (!c) return;
 
   selectedPriority = c.priority || 'long';
   const html = `
     <div class="modal-header">
-      <div class="modal-title">编辑顾客</div>
+      <div class="modal-title">编辑顾客基础信息</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <input class="input-field" id="editCustName" value="${c.name.replace(/"/g,'&quot;')}" autofocus>
-    <input class="input-field" id="editCustProject" value="${(c.project||'').replace(/"/g,'&quot;')}" placeholder="铺垫的项目">
-    <textarea class="input-field" id="editCustThought" rows="2" placeholder="顾客想法">${c.thought||''}</textarea>
+    <input class="input-field" id="editCustContact" value="${(c.contact||'').replace(/"/g,'&quot;')}" placeholder="联系方式">
     <input class="input-field" type="date" id="editCustRevisit" value="${c.revisitDate||''}">
     <div class="section-title">跟进优先级</div>
     <div class="cust-priority-selector">
@@ -1225,26 +1446,90 @@ function showEditCustomer(cid) {
 function saveEditCustomer(cid) {
   const name = document.getElementById('editCustName').value.trim();
   if (!name) { showToast('请输入顾客姓名'); return; }
-  const project = document.getElementById('editCustProject').value.trim();
-  const thought = document.getElementById('editCustThought').value.trim();
+  const contact = document.getElementById('editCustContact').value.trim();
   const revisitDate = document.getElementById('editCustRevisit').value || '';
 
   const customers = Store.get('customers', []);
   const idx = customers.findIndex(cu => cu.id === cid);
   if (idx < 0) return;
-  customers[idx] = { ...customers[idx], name, project, thought, revisitDate, priority: selectedPriority };
+  customers[idx].name = name;
+  customers[idx].contact = contact;
+  customers[idx].revisitDate = revisitDate;
+  customers[idx].priority = selectedPriority;
   Store.set('customers', customers);
   closeModal();
   speak('已更新');
   renderCustomers(document.getElementById('view-customers'));
 }
 
-function showAddFollowup(cid) {
+// 新增项目到已有顾客
+function showAddProject(cid) {
+  let customers = Store.get('customers', []);
+  customers = migrateCustomers(customers);
+  const c = customers.find(cu => cu.id === cid);
+  if (!c) return;
+
+  let existingProjectsHtml = '';
+  if (c.projects && c.projects.length > 0) {
+    existingProjectsHtml = '<div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">已有项目：' + 
+      c.projects.map(p => `<span class="cust-project-tag ${p.completed?'done':''}">${p.name}</span>`).join('') + '</div>';
+  }
+
   const html = `
     <div class="modal-header">
-      <div class="modal-title">记录跟进内容</div>
+      <div class="modal-title">📌 为 ${c.name} 新增项目</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
+    ${existingProjectsHtml}
+    <input class="input-field" id="newProjectName" placeholder="新增铺垫项目名称" autofocus>
+    <textarea class="input-field" id="newProjectThought" placeholder="顾客想法/分析" rows="2"></textarea>
+    <button class="btn btn-primary btn-full" onclick="saveAddProject('${cid}')">保存</button>
+  `;
+  showModal(html);
+}
+
+function saveAddProject(cid) {
+  const projectName = document.getElementById('newProjectName').value.trim();
+  if (!projectName) { showToast('请输入项目名称'); return; }
+  const thought = document.getElementById('newProjectThought').value.trim();
+
+  const customers = Store.get('customers', []);
+  const idx = customers.findIndex(cu => cu.id === cid);
+  if (idx < 0) return;
+  if (!customers[idx].projects) customers[idx].projects = [];
+  customers[idx].projects.push({
+    id: 'p' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+    name: projectName,
+    thought: thought,
+    date: formatDate(new Date()),
+    completed: false
+  });
+  Store.set('customers', customers);
+  closeModal();
+  speak('已添加新项目');
+  renderCustomers(document.getElementById('view-customers'));
+}
+
+function showAddFollowup(cid) {
+  let customers = Store.get('customers', []);
+  customers = migrateCustomers(customers);
+  const c = customers.find(cu => cu.id === cid);
+  if (!c) return;
+
+  // 生成项目选择下拉
+  let projectSelectHtml = '';
+  if (c.projects && c.projects.length > 0) {
+    projectSelectHtml = '<select class="input-field" id="followupProject"><option value="">不关联项目</option>' +
+      c.projects.map(p => `<option value="${p.id}">${p.name}${p.completed?' (已完成)':''}</option>`).join('') +
+      '</select>';
+  }
+
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">记录跟进内容 - ${c.name}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    ${projectSelectHtml}
     <textarea class="input-field" id="followupContent" placeholder="本次聊天/跟进内容..." rows="4" autofocus></textarea>
     <input class="input-field" type="date" id="followupNextRevisit" placeholder="下次约定回访时间">
     <button class="btn btn-primary btn-full" onclick="saveFollowup('${cid}')">保存跟进记录</button>
@@ -1256,12 +1541,19 @@ function saveFollowup(cid) {
   const content = document.getElementById('followupContent').value.trim();
   if (!content) { showToast('请输入跟进内容'); return; }
   const nextRevisit = document.getElementById('followupNextRevisit').value;
+  const projectId = document.getElementById('followupProject') ? document.getElementById('followupProject').value : '';
 
   const customers = Store.get('customers', []);
   const idx = customers.findIndex(cu => cu.id === cid);
   if (idx < 0) return;
   if (!customers[idx].followups) customers[idx].followups = [];
-  customers[idx].followups.push({ date: formatDate(new Date()), content });
+  customers[idx].followups.push({
+    id: 'f' + Date.now(),
+    projectId: projectId || null,
+    content,
+    date: formatDate(new Date()),
+    revisitDate: nextRevisit || ''
+  });
   if (nextRevisit) customers[idx].revisitDate = nextRevisit;
   Store.set('customers', customers);
   closeModal();
@@ -1276,9 +1568,16 @@ function toggleCustomerDone(cid) {
   customers[idx].completed = !customers[idx].completed;
   if (customers[idx].completed) {
     customers[idx].completedDate = formatDate(new Date());
+    // 标记所有项目为完成
+    if (customers[idx].projects) {
+      customers[idx].projects.forEach(p => p.completed = true);
+    }
     speak('已标记完成，恭喜成交');
   } else {
     delete customers[idx].completedDate;
+    if (customers[idx].projects) {
+      customers[idx].projects.forEach(p => p.completed = false);
+    }
     speak('已恢复跟进');
   }
   Store.set('customers', customers);
@@ -1286,12 +1585,322 @@ function toggleCustomerDone(cid) {
 }
 
 function deleteCustomer(cid) {
-  if (!confirm('确定删除该顾客跟进记录吗？')) return;
+  if (!confirm('确定删除该顾客全部档案吗？所有项目和跟进记录将被清除。')) return;
   const customers = Store.get('customers', []);
   const filtered = customers.filter(cu => cu.id !== cid);
   Store.set('customers', filtered);
   speak('已删除');
   renderCustomers(document.getElementById('view-customers'));
+}
+
+// ===== 顾客消费管理视图 =====
+let consumptionSearchKeyword = '';
+let consumptionFilterProject = '';
+let consumptionFilterStatus = '';
+let consumptionShowArchived = false;
+
+function renderConsumption(view) {
+  const records = Store.get('consumption', []);
+
+  // 搜索过滤
+  const keyword = consumptionSearchKeyword.toLowerCase().trim();
+  let filtered = records;
+  if (keyword) {
+    filtered = filtered.filter(r =>
+      r.name.toLowerCase().includes(keyword) ||
+      (r.contact && r.contact.toLowerCase().includes(keyword)) ||
+      (r.project && r.project.toLowerCase().includes(keyword))
+    );
+  }
+  if (consumptionFilterProject) {
+    filtered = filtered.filter(r => r.project === consumptionFilterProject);
+  }
+  if (consumptionFilterStatus) {
+    filtered = filtered.filter(r => r.status === consumptionFilterStatus);
+  }
+  if (!consumptionShowArchived) {
+    filtered = filtered.filter(r => !r.archived);
+  }
+
+  // 统计
+  const totalAmount = filtered.filter(r => !r.archived).reduce((s,r) => s + (r.amount||0), 0);
+  const totalRecords = filtered.filter(r => !r.archived).length;
+  const uniqueCustomers = new Set(filtered.filter(r => !r.archived).map(r => r.name)).size;
+
+  // 获取所有项目名称（用于筛选下拉）
+  const allProjects = [...new Set(records.map(r => r.project).filter(Boolean))].sort();
+
+  let html = `
+    <div class="consumption-stats">
+      <div class="consumption-stat-card">
+        <div class="consumption-stat-num">${totalRecords}</div>
+        <div class="consumption-stat-label">消费笔数</div>
+      </div>
+      <div class="consumption-stat-card">
+        <div class="consumption-stat-num">${uniqueCustomers}</div>
+        <div class="consumption-stat-label">消费顾客</div>
+      </div>
+      <div class="consumption-stat-card">
+        <div class="consumption-stat-num">¥${totalAmount.toFixed(0)}</div>
+        <div class="consumption-stat-label">消费总额</div>
+      </div>
+    </div>
+    <div class="consumption-search-bar">
+      <input class="consumption-search-input" id="consumptionSearch" placeholder="🔍 搜索顾客姓名/手机号/消费项目..." value="${consumptionSearchKeyword}" oninput="onConsumptionSearch(this.value)">
+    </div>
+    <div class="consumption-filter-bar">
+      <select class="consumption-filter-select" onchange="onConsumptionFilterProject(this.value)">
+        <option value="">所有项目</option>
+        ${allProjects.map(p => `<option value="${p}" ${consumptionFilterProject===p?'selected':''}>${p}</option>`).join('')}
+      </select>
+      <select class="consumption-filter-select" onchange="onConsumptionFilterStatus(this.value)">
+        <option value="">所有状态</option>
+        <option value="paid" ${consumptionFilterStatus==='paid'?'selected':''}>已付款未操作</option>
+        <option value="done" ${consumptionFilterStatus==='done'?'selected':''}>已做完项目</option>
+        <option value="aftercare" ${consumptionFilterStatus==='aftercare'?'selected':''}>售后保养阶段</option>
+      </select>
+      <label class="consumption-archive-toggle">
+        <input type="checkbox" ${consumptionShowArchived?'checked':''} onchange="onConsumptionToggleArchived(this.checked)"> 显示已归档
+      </label>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="showAddConsumption()" style="margin-bottom:12px;">
+      ➕ 新增消费记录
+    </button>
+  `;
+
+  // 按顾客分组，每个顾客内按时间倒序
+  const byCustomer = {};
+  filtered.forEach(r => {
+    if (!byCustomer[r.name]) byCustomer[r.name] = [];
+    byCustomer[r.name].push(r);
+  });
+
+  // 每组内按日期倒序
+  Object.keys(byCustomer).forEach(name => {
+    byCustomer[name].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+  });
+
+  const customerNames = Object.keys(byCustomer).sort();
+  if (customerNames.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">💳</div><div class="es-text">${keyword ? '没有找到匹配的消费记录' : '还没有消费记录，点击上方按钮添加'}</div></div>`;
+  } else {
+    html += `<div class="section-title">消费记录 (${customerNames.length} 位顾客)</div>`;
+    customerNames.forEach(name => {
+      const custRecords = byCustomer[name];
+      html += custRecords.map(r => renderConsumptionItem(r)).join('');
+    });
+  }
+
+  view.innerHTML = html;
+}
+
+function renderConsumptionItem(r) {
+  const statusMap = {
+    paid: { label: '已付款未操作', class: 'status-paid' },
+    done: { label: '已做完项目', class: 'status-done' },
+    aftercare: { label: '售后保养阶段', class: 'status-aftercare' }
+  };
+  const st = statusMap[r.status] || statusMap.paid;
+
+  // 跨表联动：检查是否有跟进记录
+  const customers = Store.get('customers', []);
+  const hasFollowup = customers.some(c => c.name === r.name);
+
+  return `
+    <div class="consumption-item ${st.class} ${r.archived ? 'archived' : ''}">
+      <div class="consumption-item-header">
+        <div class="consumption-item-name">${r.name}</div>
+        <span class="consumption-item-status ${st.class}">${st.label}</span>
+      </div>
+      ${r.contact ? `<div class="consumption-item-field"><span class="cif-label">联系方式：</span>${r.contact}</div>` : ''}
+      <div class="consumption-item-field"><span class="cif-label">消费项目：</span>${r.project || '-'}</div>
+      <div class="consumption-item-amount">¥${(r.amount||0).toFixed(2)}</div>
+      <div class="consumption-item-field"><span class="cif-label">成交日期：</span>${r.date || '-'}</div>
+      ${r.notes ? `<div class="consumption-item-field"><span class="cif-label">售后备注：</span>${r.notes}</div>` : ''}
+      ${r.archived ? '<div class="consumption-item-field" style="color:var(--gray);">📦 已归档</div>' : ''}
+      <div class="consumption-item-actions">
+        <button onclick="showEditConsumption('${r.id}')">✏️ 编辑</button>
+        ${hasFollowup ? `<button onclick="jumpToFollowup('${r.name.replace(/'/g, "\\'")}')">👥 查看跟进档案</button>` : ''}
+        ${!r.archived ? `<button class="archive" onclick="archiveConsumption('${r.id}')">📦 归档</button>` : `<button class="archive" onclick="unarchiveConsumption('${r.id}')">📤 取消归档</button>`}
+        <button class="danger" onclick="deleteConsumption('${r.id}')">🗑 删除</button>
+      </div>
+    </div>
+  `;
+}
+
+function onConsumptionSearch(val) {
+  consumptionSearchKeyword = val;
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+function onConsumptionFilterProject(val) {
+  consumptionFilterProject = val;
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+function onConsumptionFilterStatus(val) {
+  consumptionFilterStatus = val;
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+function onConsumptionToggleArchived(checked) {
+  consumptionShowArchived = checked;
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+
+// 跨表联动：从消费跳转到跟进
+function jumpToFollowup(name) {
+  custSearchKeyword = name;
+  switchView('customers');
+}
+
+function showAddConsumption() {
+  // 获取已有顾客名用于自动联想提示
+  const customers = Store.get('customers', []);
+  const custNames = customers.map(c => c.name);
+
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">新增消费记录</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="consName" placeholder="顾客姓名" autofocus list="custNameList" oninput="checkConsName(this.value)">
+    <datalist id="custNameList">
+      ${custNames.map(n => `<option value="${n}">`).join('')}
+    </datalist>
+    <div id="consNameHint" style="font-size:12px;margin-top:-6px;margin-bottom:8px;display:none;"></div>
+    <input class="input-field" id="consContact" placeholder="联系方式（手机号/微信号）">
+    <input class="input-field" id="consProject" placeholder="消费项目名称（如：双眼皮/胶原水光）">
+    <input class="input-field" type="number" id="consAmount" placeholder="实际消费金额" step="0.01">
+    <input class="input-field" type="date" id="consDate" value="${formatDate(new Date())}">
+    <div class="section-title">操作完成状态</div>
+    <select class="input-field" id="consStatus">
+      <option value="paid">已付款未操作</option>
+      <option value="done">已做完项目</option>
+      <option value="aftercare">售后保养阶段</option>
+    </select>
+    <textarea class="input-field" id="consNotes" placeholder="售后备注（术后反应/复诊约定/顾客反馈等）" rows="2"></textarea>
+    <button class="btn btn-primary btn-full" onclick="saveNewConsumption()">保存</button>
+  `;
+  showModal(html);
+}
+
+function checkConsName(name) {
+  const hint = document.getElementById('consNameHint');
+  if (!name.trim()) { hint.style.display = 'none'; return; }
+  const customers = Store.get('customers', []);
+  const existing = customers.find(c => c.name === name.trim());
+  if (existing) {
+    hint.style.display = 'block';
+    hint.style.color = '#4CAF50';
+    hint.innerHTML = '✅ 已关联跟进档案';
+  } else {
+    hint.style.display = 'block';
+    hint.style.color = '#FF9800';
+    hint.innerHTML = '💡 该顾客暂无跟进档案，将独立记录';
+  }
+}
+
+function saveNewConsumption() {
+  const name = document.getElementById('consName').value.trim();
+  if (!name) { showToast('请输入顾客姓名'); return; }
+  const contact = document.getElementById('consContact').value.trim();
+  const project = document.getElementById('consProject').value.trim();
+  const amount = parseFloat(document.getElementById('consAmount').value);
+  if (!amount || amount <= 0) { showToast('请输入有效金额'); return; }
+  const date = document.getElementById('consDate').value || formatDate(new Date());
+  const status = document.getElementById('consStatus').value;
+  const notes = document.getElementById('consNotes').value.trim();
+
+  const records = Store.get('consumption', []);
+  records.push({
+    id: 'r' + Date.now(),
+    name, contact, project, amount, date, status, notes,
+    archived: false,
+    createdAt: formatDate(new Date())
+  });
+  Store.set('consumption', records);
+  closeModal();
+  speak('已记录消费');
+  renderConsumption(document.getElementById('view-consumption'));
+}
+
+function showEditConsumption(rid) {
+  const records = Store.get('consumption', []);
+  const r = records.find(rec => rec.id === rid);
+  if (!r) return;
+
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">编辑消费记录</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="editConsName" value="${r.name.replace(/"/g,'&quot;')}" autofocus>
+    <input class="input-field" id="editConsContact" value="${(r.contact||'').replace(/"/g,'&quot;')}" placeholder="联系方式">
+    <input class="input-field" id="editConsProject" value="${(r.project||'').replace(/"/g,'&quot;')}" placeholder="消费项目">
+    <input class="input-field" type="number" id="editConsAmount" value="${r.amount||0}" step="0.01">
+    <input class="input-field" type="date" id="editConsDate" value="${r.date||''}">
+    <div class="section-title">操作完成状态</div>
+    <select class="input-field" id="editConsStatus">
+      <option value="paid" ${r.status==='paid'?'selected':''}>已付款未操作</option>
+      <option value="done" ${r.status==='done'?'selected':''}>已做完项目</option>
+      <option value="aftercare" ${r.status==='aftercare'?'selected':''}>售后保养阶段</option>
+    </select>
+    <textarea class="input-field" id="editConsNotes" rows="2" placeholder="售后备注">${r.notes||''}</textarea>
+    <button class="btn btn-primary btn-full" onclick="saveEditConsumption('${rid}')">保存</button>
+  `;
+  showModal(html);
+}
+
+function saveEditConsumption(rid) {
+  const name = document.getElementById('editConsName').value.trim();
+  if (!name) { showToast('请输入顾客姓名'); return; }
+  const contact = document.getElementById('editConsContact').value.trim();
+  const project = document.getElementById('editConsProject').value.trim();
+  const amount = parseFloat(document.getElementById('editConsAmount').value);
+  if (!amount || amount <= 0) { showToast('请输入有效金额'); return; }
+  const date = document.getElementById('editConsDate').value || formatDate(new Date());
+  const status = document.getElementById('editConsStatus').value;
+  const notes = document.getElementById('editConsNotes').value.trim();
+
+  const records = Store.get('consumption', []);
+  const idx = records.findIndex(r => r.id === rid);
+  if (idx < 0) return;
+  records[idx] = { ...records[idx], name, contact, project, amount, date, status, notes };
+  Store.set('consumption', records);
+  closeModal();
+  speak('已更新');
+  renderConsumption(document.getElementById('view-consumption'));
+}
+
+function archiveConsumption(rid) {
+  const records = Store.get('consumption', []);
+  const idx = records.findIndex(r => r.id === rid);
+  if (idx < 0) return;
+  records[idx].archived = true;
+  Store.set('consumption', records);
+  speak('已归档');
+  renderConsumption(document.getElementById('view-consumption'));
+}
+
+function unarchiveConsumption(rid) {
+  const records = Store.get('consumption', []);
+  const idx = records.findIndex(r => r.id === rid);
+  if (idx < 0) return;
+  records[idx].archived = false;
+  Store.set('consumption', records);
+  speak('已取消归档');
+  renderConsumption(document.getElementById('view-consumption'));
+}
+
+function deleteConsumption(rid) {
+  if (!confirm('确定删除该消费记录吗？')) return;
+  const records = Store.get('consumption', []);
+  const filtered = records.filter(r => r.id !== rid);
+  Store.set('consumption', filtered);
+  speak('已删除');
+  renderConsumption(document.getElementById('view-consumption'));
 }
 
 // ===== 设置视图 =====
@@ -1417,7 +2026,7 @@ function toggleVoice() {
 
 function exportData() {
   const data = {};
-  ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers'].forEach(k => {
+  ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers', 'consumption'].forEach(k => {
     data[k] = Store.get(k);
   });
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
