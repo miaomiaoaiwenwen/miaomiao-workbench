@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#FF6B9D">
+  <title>妙妙工作台 · 个人医美工作台</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <!-- 顶部栏 -->
+  <header class="topbar" id="topbar">
+    <button class="icon-btn" id="menuToggle" aria-label="菜单">
+      <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </button>
+    <div class="topbar-title" id="topbarTitle">每日工作</div>
+    <button class="icon-btn" id="dateToggle" aria-label="日期">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M7 2v2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V2h-2v2H9V2H7zm12 7v11H5V9h14z"/></svg>
+    </button>
+  </header>
+
+  <!-- 左侧抽屉菜单 -->
+  <div class="drawer-overlay" id="drawerOverlay"></div>
+  <nav class="drawer" id="drawer">
+    <div class="drawer-header">
+      <div class="drawer-avatar">🌸</div>
+      <div class="drawer-name">妙妙</div>
+      <div class="drawer-subtitle">医美顾问 · 工作台</div>
+    </div>
+    <div class="drawer-menu" id="drawerMenu">
+      <!-- 菜单项由JS生成 -->
+    </div>
+    <div class="drawer-footer">
+      <div class="drawer-stats" id="drawerStats">
+        <span class="stat-dot stat-pink"></span>
+        <span id="todayProgress">今日完成 0/10</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- 主内容区 -->
+  <main class="content" id="content">
+    <!-- 各视图由JS渲染 -->
+  </main>
+
+  <!-- 提醒弹窗 -->
+  <div class="toast" id="toast"></div>
+
+  <!-- 计时器浮窗 -->
+  <div class="timer-float" id="timerFloat" style="display:none">
+    <div class="timer-float-inner" id="timerFloatInner"></div>
+  </div>
+
+  <!-- 模态框 -->
+  <div class="modal-overlay" id="modalOverlay" style="display:none">
+    <div class="modal" id="modal"></div>
+  </div>
+
+  <!-- 语音播放提示 -->
+  <div class="voice-hint" id="voiceHint" style="display:none">
+    <div class="voice-hint-bar"></div>
+  </div>
+
+  <script src="js/data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
