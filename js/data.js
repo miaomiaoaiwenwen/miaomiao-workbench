@@ -4,6 +4,7 @@
 const MENU = [
   { id: 'daily', icon: '📋', name: '每日工作' },
   { id: 'customers', icon: '👥', name: '顾客跟进' },
+  { id: 'consumption', icon: '💳', name: '顾客消费' },
   { id: 'skin', icon: '🧴', name: '皮肤专业' },
   { id: 'photoelectric', icon: '💡', name: '光电专业' },
   { id: 'waterlight', icon: '💧', name: '水光产品' },
