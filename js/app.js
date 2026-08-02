@@ -97,6 +97,7 @@ function switchView(viewId) {
 
   switch(viewId) {
     case 'daily': renderDaily(view); break;
+    case 'customers': renderCustomers(view); break;
     case 'skin': renderKnowledge(view, SKIN_DATA, '皮肤专业知识'); break;
     case 'photoelectric': renderKnowledge(view, PHOTO_DATA, '光电专业知识'); break;
     case 'waterlight': renderKnowledge(view, WATER_DATA, '水光产品知识'); break;
@@ -1024,6 +1025,275 @@ function renderCreation(view) {
   view.innerHTML = html;
 }
 
+// ===== 顾客跟进视图 =====
+const PRIORITY = {
+  urgent: { label: '7天紧急回访', tag: 'urgent', class: 'priority-urgent' },
+  month:  { label: '1个月内回访', tag: 'month', class: 'priority-month' },
+  long:   { label: '长期慢慢跟进', tag: 'long', class: 'priority-long' }
+};
+
+function renderCustomers(view) {
+  const customers = Store.get('customers', []);
+
+  // 统计
+  const active = customers.filter(c => !c.completed);
+  const urgentCount = active.filter(c => c.priority === 'urgent').length;
+  const monthCount  = active.filter(c => c.priority === 'month').length;
+  const longCount   = active.filter(c => c.priority === 'long').length;
+  const doneCount   = customers.filter(c => c.completed).length;
+
+  // 检查是否有到期回访
+  const today = new Date();
+  const todayStr = formatDate(today);
+  let overdueCount = 0;
+  active.forEach(c => {
+    if (c.revisitDate && c.revisitDate <= todayStr) overdueCount++;
+  });
+
+  let html = `
+    <div class="cust-stats">
+      <div class="cust-stat-card">
+        <div class="cust-stat-num red">${urgentCount}</div>
+        <div class="cust-stat-label">7天紧急</div>
+      </div>
+      <div class="cust-stat-card">
+        <div class="cust-stat-num yellow">${monthCount}</div>
+        <div class="cust-stat-label">1个月内</div>
+      </div>
+      <div class="cust-stat-card">
+        <div class="cust-stat-num pink">${longCount}</div>
+        <div class="cust-stat-label">长期跟进</div>
+      </div>
+    </div>
+  `;
+
+  if (overdueCount > 0) {
+    html += `
+      <div class="leave-bar" style="border-color:var(--red);background:#FFEBEE;">
+        <span class="leave-icon">⏰</span>
+        <span class="leave-text" style="color:#C62828;">有 ${overdueCount} 位顾客到了约定回访时间，请尽快跟进</span>
+      </div>
+    `;
+  }
+
+  // 添加按钮
+  html += `
+    <button class="btn btn-primary btn-full" onclick="showAddCustomer()" style="margin-bottom:14px;">
+      ➕ 新增顾客跟进
+    </button>
+  `;
+
+  // 待跟进列表
+  html += `<div class="section-title">待跟进顾客 (${active.length})</div>`;
+  if (active.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">👥</div><div class="es-text">还没有待跟进的顾客，点击上方按钮添加</div></div>`;
+  } else {
+    // 按优先级排序：紧急 > 1个月 > 长期
+    const order = { urgent: 0, month: 1, long: 2 };
+    active.sort((a, b) => (order[a.priority] || 2) - (order[b.priority] || 2));
+    html += active.map(c => renderCustomerItem(c)).join('');
+  }
+
+  // 已完成列表
+  if (doneCount > 0) {
+    html += `<div class="cust-done-section">`;
+    html += `<div class="cust-done-header">✅ 已完成/已成交 (${doneCount})</div>`;
+    html += customers.filter(c => c.completed).map(c => renderCustomerItem(c)).join('');
+    html += `</div>`;
+  }
+
+  view.innerHTML = html;
+}
+
+function renderCustomerItem(c) {
+  const p = PRIORITY[c.priority] || PRIORITY.long;
+  const isOverdue = c.revisitDate && c.revisitDate <= formatDate(new Date()) && !c.completed;
+
+  let followupHtml = '';
+  if (c.followups && c.followups.length > 0) {
+    followupHtml = '<div class="cust-followups">';
+    c.followups.slice().reverse().forEach(f => {
+      followupHtml += `
+        <div class="cust-followup-item">
+          <span class="cust-followup-date">${f.date}</span> ${f.content}
+        </div>
+      `;
+    });
+    followupHtml += '</div>';
+  }
+
+  return `
+    <div class="cust-item ${c.completed ? 'completed' : p.class}">
+      <div class="cust-item-header">
+        <div class="cust-name">${c.name}</div>
+        ${c.completed
+          ? '<span class="cust-priority-tag" style="background:#E0E0E0;color:#757575;">已完成</span>'
+          : `<span class="cust-priority-tag ${p.tag}">${p.label}</span>`
+        }
+      </div>
+      ${c.project ? `<div class="cust-field"><span class="cust-field-label">铺垫项目：</span>${c.project}</div>` : ''}
+      ${c.thought ? `<div class="cust-field"><span class="cust-field-label">顾客想法：</span>${c.thought}</div>` : ''}
+      ${followupHtml}
+      ${c.revisitDate ? `<div class="cust-revisit-date ${isOverdue ? 'overdue' : ''}">📅 回访时间：${c.revisitDate}${isOverdue ? ' ⚠已到期' : ''}</div>` : ''}
+      <div class="cust-actions">
+        ${!c.completed ? `<button class="cust-action-btn" onclick="showAddFollowup('${c.id}')">💬 记跟进</button>` : ''}
+        <button class="cust-action-btn" onclick="showEditCustomer('${c.id}')">✏️ 编辑</button>
+        ${!c.completed ? `<button class="cust-action-btn success" onclick="toggleCustomerDone('${c.id}')">✅ 完成成交</button>` : ''}
+        ${c.completed ? `<button class="cust-action-btn" onclick="toggleCustomerDone('${c.id}')">↩️ 恢复跟进</button>` : ''}
+        <button class="cust-action-btn danger" onclick="deleteCustomer('${c.id}')">🗑 删除</button>
+      </div>
+    </div>
+  `;
+}
+
+function showAddCustomer() {
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">新增顾客跟进</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="custName" placeholder="顾客姓名" autofocus>
+    <input class="input-field" id="custProject" placeholder="铺垫的项目">
+    <textarea class="input-field" id="custThought" placeholder="顾客想法" rows="2"></textarea>
+    <input class="input-field" type="date" id="custRevisit" placeholder="约定回访时间">
+    <div class="section-title">跟进优先级</div>
+    <div class="cust-priority-selector">
+      <div class="cust-priority-opt urgent active" data-priority="urgent" onclick="selectPriority(this)">7天紧急回访</div>
+      <div class="cust-priority-opt month" data-priority="month" onclick="selectPriority(this)">1个月内回访</div>
+      <div class="cust-priority-opt long" data-priority="long" onclick="selectPriority(this)">长期慢慢跟进</div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveNewCustomer()">保存</button>
+  `;
+  showModal(html);
+}
+
+let selectedPriority = 'urgent';
+function selectPriority(el) {
+  selectedPriority = el.dataset.priority;
+  document.querySelectorAll('.cust-priority-opt').forEach(o => o.classList.remove('active'));
+  el.classList.add('active');
+}
+
+function saveNewCustomer() {
+  const name = document.getElementById('custName').value.trim();
+  if (!name) { showToast('请输入顾客姓名'); return; }
+  const project = document.getElementById('custProject').value.trim();
+  const thought = document.getElementById('custThought').value.trim();
+  const revisitDate = document.getElementById('custRevisit').value || '';
+
+  const customers = Store.get('customers', []);
+  customers.push({
+    id: 'c' + Date.now(),
+    name, project, thought, revisitDate,
+    priority: selectedPriority,
+    followups: [],
+    completed: false,
+    createdAt: formatDate(new Date())
+  });
+  Store.set('customers', customers);
+  closeModal();
+  speak('已添加顾客');
+  renderCustomers(document.getElementById('view-customers'));
+}
+
+function showEditCustomer(cid) {
+  const customers = Store.get('customers', []);
+  const c = customers.find(cu => cu.id === cid);
+  if (!c) return;
+
+  selectedPriority = c.priority || 'long';
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">编辑顾客</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="editCustName" value="${c.name.replace(/"/g,'&quot;')}" autofocus>
+    <input class="input-field" id="editCustProject" value="${(c.project||'').replace(/"/g,'&quot;')}" placeholder="铺垫的项目">
+    <textarea class="input-field" id="editCustThought" rows="2" placeholder="顾客想法">${c.thought||''}</textarea>
+    <input class="input-field" type="date" id="editCustRevisit" value="${c.revisitDate||''}">
+    <div class="section-title">跟进优先级</div>
+    <div class="cust-priority-selector">
+      <div class="cust-priority-opt urgent ${c.priority==='urgent'?'active':''}" data-priority="urgent" onclick="selectPriority(this)">7天紧急回访</div>
+      <div class="cust-priority-opt month ${c.priority==='month'?'active':''}" data-priority="month" onclick="selectPriority(this)">1个月内回访</div>
+      <div class="cust-priority-opt long ${c.priority==='long'?'active':''}" data-priority="long" onclick="selectPriority(this)">长期慢慢跟进</div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveEditCustomer('${cid}')">保存</button>
+  `;
+  showModal(html);
+}
+
+function saveEditCustomer(cid) {
+  const name = document.getElementById('editCustName').value.trim();
+  if (!name) { showToast('请输入顾客姓名'); return; }
+  const project = document.getElementById('editCustProject').value.trim();
+  const thought = document.getElementById('editCustThought').value.trim();
+  const revisitDate = document.getElementById('editCustRevisit').value || '';
+
+  const customers = Store.get('customers', []);
+  const idx = customers.findIndex(cu => cu.id === cid);
+  if (idx < 0) return;
+  customers[idx] = { ...customers[idx], name, project, thought, revisitDate, priority: selectedPriority };
+  Store.set('customers', customers);
+  closeModal();
+  speak('已更新');
+  renderCustomers(document.getElementById('view-customers'));
+}
+
+function showAddFollowup(cid) {
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">记录跟进内容</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <textarea class="input-field" id="followupContent" placeholder="本次聊天/跟进内容..." rows="4" autofocus></textarea>
+    <input class="input-field" type="date" id="followupNextRevisit" placeholder="下次约定回访时间">
+    <button class="btn btn-primary btn-full" onclick="saveFollowup('${cid}')">保存跟进记录</button>
+  `;
+  showModal(html);
+}
+
+function saveFollowup(cid) {
+  const content = document.getElementById('followupContent').value.trim();
+  if (!content) { showToast('请输入跟进内容'); return; }
+  const nextRevisit = document.getElementById('followupNextRevisit').value;
+
+  const customers = Store.get('customers', []);
+  const idx = customers.findIndex(cu => cu.id === cid);
+  if (idx < 0) return;
+  if (!customers[idx].followups) customers[idx].followups = [];
+  customers[idx].followups.push({ date: formatDate(new Date()), content });
+  if (nextRevisit) customers[idx].revisitDate = nextRevisit;
+  Store.set('customers', customers);
+  closeModal();
+  speak('已记录跟进');
+  renderCustomers(document.getElementById('view-customers'));
+}
+
+function toggleCustomerDone(cid) {
+  const customers = Store.get('customers', []);
+  const idx = customers.findIndex(cu => cu.id === cid);
+  if (idx < 0) return;
+  customers[idx].completed = !customers[idx].completed;
+  if (customers[idx].completed) {
+    customers[idx].completedDate = formatDate(new Date());
+    speak('已标记完成，恭喜成交');
+  } else {
+    delete customers[idx].completedDate;
+    speak('已恢复跟进');
+  }
+  Store.set('customers', customers);
+  renderCustomers(document.getElementById('view-customers'));
+}
+
+function deleteCustomer(cid) {
+  if (!confirm('确定删除该顾客跟进记录吗？')) return;
+  const customers = Store.get('customers', []);
+  const filtered = customers.filter(cu => cu.id !== cid);
+  Store.set('customers', filtered);
+  speak('已删除');
+  renderCustomers(document.getElementById('view-customers'));
+}
+
 // ===== 设置视图 =====
 function renderSettings(view) {
   const tasks = getTasks();
@@ -1147,7 +1417,7 @@ function toggleVoice() {
 
 function exportData() {
   const data = {};
-  ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn'].forEach(k => {
+  ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers'].forEach(k => {
     data[k] = Store.get(k);
   });
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
