@@ -517,6 +517,131 @@ html, body {
 .input-field:focus { border-color: var(--pink); }
 textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
 
+/* 顾客跟进 - 搜索栏 */
+.cust-search-bar {
+  display: flex; gap: 8px; margin-bottom: 12px; align-items: center;
+}
+.cust-search-input {
+  flex: 1; border: 1.5px solid #F0F0F0; border-radius: 20px; padding: 8px 16px;
+  font-size: 13px; background: var(--white); color: var(--text); outline: none;
+}
+.cust-search-input:focus { border-color: var(--pink); }
+
+/* 顾客项目标签 */
+.cust-project-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.cust-project-tag {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  background: rgba(255,107,157,0.12); color: var(--pink);
+}
+.cust-project-tag.done { background: #E0E0E0; color: #9E9E9E; text-decoration: line-through; }
+
+/* 顾客最新动态 */
+.cust-latest-activity {
+  font-size: 12px; color: var(--text-light); margin-top: 6px;
+  background: rgba(255,255,255,0.5); border-radius: 8px; padding: 6px 10px;
+  line-height: 1.5;
+}
+.cust-latest-activity .cla-label { font-weight: 600; color: var(--text); }
+
+/* 顾客详情 - 时间线 */
+.cust-timeline { margin-top: 10px; }
+.cust-timeline-entry {
+  position: relative; padding: 10px 12px 10px 32px; margin-bottom: 8px;
+  border-radius: 10px; font-size: 13px; line-height: 1.5;
+}
+.cust-timeline-entry::before {
+  content: ''; position: absolute; left: 12px; top: 14px; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--pink);
+}
+.cust-timeline-entry::after {
+  content: ''; position: absolute; left: 15px; top: 24px; bottom: -8px; width: 2px;
+  background: rgba(255,107,157,0.15);
+}
+.cust-timeline-entry:last-child::after { display: none; }
+.cust-timeline-entry.type-project { background: var(--pink-soft); }
+.cust-timeline-entry.type-project::before { background: var(--pink); }
+.cust-timeline-entry.type-followup { background: var(--lavender-light); }
+.cust-timeline-entry.type-followup::before { background: var(--lavender); }
+.cust-timeline-entry.completed { background: #F5F5F5; opacity: 0.6; }
+.cust-timeline-entry.completed::before { background: var(--gray); }
+.cust-timeline-entry .te-type {
+  font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+  background: rgba(255,255,255,0.6); margin-right: 6px;
+}
+.cust-timeline-entry .te-date { font-size: 11px; color: var(--text-light); font-weight: 600; }
+.cust-timeline-entry .te-content { margin-top: 4px; color: var(--text); }
+.cust-timeline-entry .te-project-name { font-weight: 700; color: var(--pink); }
+
+/* 跨表联动按钮 */
+.cust-cross-link {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 12px;
+  padding: 5px 12px; border-radius: 20px; background: var(--lavender-light);
+  color: var(--lavender); font-weight: 600; cursor: pointer; border: none;
+}
+
+/* ============ 顾客消费管理 ============ */
+.consumption-search-bar {
+  display: flex; gap: 8px; margin-bottom: 10px; align-items: center;
+}
+.consumption-search-input {
+  flex: 1; border: 1.5px solid #F0F0F0; border-radius: 20px; padding: 8px 16px;
+  font-size: 13px; background: var(--white); color: var(--text); outline: none;
+}
+.consumption-search-input:focus { border-color: var(--pink); }
+
+.consumption-stats {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px;
+}
+.consumption-stat-card {
+  background: var(--white); border-radius: var(--radius-sm); padding: 10px;
+  box-shadow: var(--shadow); text-align: center;
+}
+.consumption-stat-num { font-size: 18px; font-weight: 800; color: var(--pink); }
+.consumption-stat-label { font-size: 11px; color: var(--text-light); margin-top: 2px; }
+
+.consumption-filter-bar {
+  display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; align-items: center;
+}
+.consumption-filter-select {
+  border: 1.5px solid #F0F0F0; border-radius: 10px; padding: 5px 10px; font-size: 12px;
+  background: var(--white); color: var(--text); outline: none;
+}
+.consumption-filter-select:focus { border-color: var(--pink); }
+
+.consumption-item {
+  background: var(--white); border-radius: var(--radius-sm); padding: 12px 14px;
+  box-shadow: var(--shadow); margin-bottom: 8px; border-left: 4px solid transparent;
+  transition: all 0.2s;
+}
+.consumption-item.status-paid { border-left-color: #4CAF50; }
+.consumption-item.status-done { border-left-color: var(--pink); }
+.consumption-item.status-aftercare { border-left-color: #FF9800; }
+.consumption-item.archived { opacity: 0.5; background: #F5F5F5; }
+
+.consumption-item-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.consumption-item-name { font-size: 14px; font-weight: 700; flex: 1; }
+.consumption-item-status {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 10px; white-space: nowrap;
+}
+.consumption-item-status.status-paid { background: #E8F5E9; color: #2E7D32; }
+.consumption-item-status.status-done { background: var(--pink-light); color: #C2185B; }
+.consumption-item-status.status-aftercare { background: #FFF3E0; color: #E65100; }
+.consumption-item-field { font-size: 12px; color: var(--text); margin-top: 4px; }
+.consumption-item-field .cif-label { color: var(--text-light); font-weight: 600; }
+.consumption-item-amount { font-size: 16px; font-weight: 800; color: var(--pink); margin-top: 4px; }
+.consumption-item-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #F5F5F5; flex-wrap: wrap; }
+.consumption-item-actions button {
+  background: var(--pink-soft); border: none; border-radius: 8px; padding: 4px 10px;
+  font-size: 11px; color: var(--pink); font-weight: 600; cursor: pointer;
+}
+.consumption-item-actions button.danger { color: var(--red); }
+.consumption-item-actions button.archive { color: var(--lavender); }
+.consumption-archive-toggle {
+  display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-light);
+  margin-bottom: 8px; cursor: pointer;
+}
+.consumption-archive-toggle input { cursor: pointer; }
+
 /* 响应式 */
 @media (min-width: 768px) {
   .content { max-width: 500px; margin-left: auto; margin-right: auto; }
