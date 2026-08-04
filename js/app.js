@@ -323,6 +323,7 @@ function renderKnowledge(view, data, title) {
         <div class="kc-footer">
           <span class="kc-source">📌 ${item.source || ''}</span>
           <div class="kc-actions">
+            <button class="kc-action-btn kc-video-btn" onclick="showKnowledgeVideo('${item.title.replace(/'/g, "\\'")}', '${(item.video||'').replace(/'/g, "\\'")}', '${item.summary.replace(/'/g, "\\'").replace(/\n/g, '\\n')}')">▶️ 视频</button>
             <button class="kc-action-btn" onclick="speak('${item.title.replace(/'/g, "\\'")}')">🔊 听</button>
             <button class="kc-action-btn" onclick="copyText('${(item.title + ' - ' + item.summary).replace(/'/g, "\\'").replace(/\n/g, '\\n')}')">📋 复制</button>
           </div>
@@ -331,6 +332,16 @@ function renderKnowledge(view, data, title) {
     </div>
   `).join('');
   view.innerHTML = html;
+}
+
+function showKnowledgeVideo(title, videoUrl, summary) {
+  const contentHtml = `
+    <div class="vp-section">
+      <div class="vp-section-title">📖 知识内容</div>
+      <div class="vp-summary">${summary}</div>
+    </div>
+  `;
+  showVideoPlayer(title, videoUrl, contentHtml);
 }
 
 function tagColor(tag) {
@@ -386,6 +397,7 @@ function renderKnowledgeItems(view, items, title) {
         <div class="kc-footer">
           <span class="kc-source">📌 ${item.source || ''}</span>
           <div class="kc-actions">
+            <button class="kc-action-btn kc-video-btn" onclick="showKnowledgeVideo('${item.title.replace(/'/g, "\\'")}', '${(item.video||'').replace(/'/g, "\\'")}', '${item.summary.replace(/'/g, "\\'").replace(/\n/g, '\\n')}')">▶️ 视频</button>
             <button class="kc-action-btn" onclick="speak('${item.title.replace(/'/g, "\\'")}')">🔊 听</button>
             <button class="kc-action-btn" onclick="copyText('${(item.title + ' - ' + item.summary).replace(/'/g, "\\'").replace(/\n/g, '\\n')}')">📋 复制</button>
           </div>
@@ -541,12 +553,16 @@ function renderExercise(view) {
 
 function renderExerciseList(cat) {
   const items = EXERCISE_DATA[cat] || [];
-  return items.map(item => `
-    <div class="exercise-card" onclick="playExercise('${item.title.replace(/'/g, "\\'")}')">
-      <img class="ex-thumb" src="${item.thumb}" alt="${item.title}">
+  return items.map((item, idx) => `
+    <div class="exercise-card">
+      <img class="ex-thumb" src="${item.thumb}" alt="${item.title}" onclick="playExercise(${idx}, '${cat}')">
       <div class="ex-body">
         <div class="ex-title">${item.title}</div>
         <div class="ex-meta">⏱ ${item.duration} · 📊 ${item.level}</div>
+        <div class="ex-actions">
+          <button class="ex-video-btn" onclick="playExercise(${idx}, '${cat}')">▶️ 视频跟练</button>
+          <button class="ex-text-btn" onclick="showExerciseSteps(${idx}, '${cat}')">📖 动作步骤</button>
+        </div>
       </div>
     </div>
   `).join('');
@@ -558,10 +574,41 @@ function switchExerciseCategory(cat) {
   renderExercise(view);
 }
 
-function playExercise(title) {
-  speak(title + '，开始运动吧');
-  startTimer('exercise', title);
-  showToast('▶️ ' + title);
+function playExercise(idx, cat) {
+  const item = EXERCISE_DATA[cat][idx];
+  if (!item) return;
+  const stepsHtml = `
+    <div class="vp-section">
+      <div class="vp-section-title">📋 动作步骤详解</div>
+      <div class="vp-steps">${(item.steps || '').replace(/\n/g, '<br>')}</div>
+    </div>
+    <div class="vp-section">
+      <div class="vp-section-title">⏱ 时长：${item.duration} · 难度：${item.level}</div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="startTimer('exercise', '${item.title.replace(/'/g, "\\'")}'); closeModal();" style="margin-top:12px;">⏱ 开始计时跟练</button>
+  `;
+  showVideoPlayer(item.title, item.video, stepsHtml);
+  speak(item.title + '，开始运动吧');
+}
+
+function showExerciseSteps(idx, cat) {
+  const item = EXERCISE_DATA[cat][idx];
+  if (!item) return;
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">${item.title}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="vp-section">
+      <div class="vp-section-title">📋 动作步骤详解</div>
+      <div class="vp-steps">${(item.steps || '').replace(/\n/g, '<br>')}</div>
+    </div>
+    <div class="vp-section">
+      <div class="vp-section-title">⏱ 时长：${item.duration} · 难度：${item.level}</div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="startTimer('exercise', '${item.title.replace(/'/g, "\\'")}'); closeModal();" style="margin-top:12px;">⏱ 开始计时跟练</button>
+  `;
+  showModal(html);
 }
 
 // ===== 英语学习视图 =====
@@ -1061,9 +1108,15 @@ function renderCreation(view) {
     </div>
     <div class="section-title">今日推荐 ${items.length} 条</div>
   `;
-  html += items.map(item => `
+  html += items.map((item, idx) => {
+    const safeTitle = item.title.replace(/'/g, "\\'");
+    const safeVideo = (item.video||'').replace(/'/g, "\\'");
+    const safeAnalysis = (item.analysis||'').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+    const safeReason = item.reason.replace(/'/g, "\\'");
+    const safeRewrite = item.rewrite.replace(/'/g, "\\'");
+    return `
     <div class="creation-card">
-      <img class="cc-thumb" src="${item.thumb}" alt="${item.title}">
+      <img class="cc-thumb" src="${item.thumb}" alt="${item.title}" onclick="showCreationVideo('${safeTitle}', '${safeVideo}', '${safeAnalysis}')">
       <div class="cc-body">
         <div class="cc-title">${item.title}</div>
         <div class="cc-meta">
@@ -1079,14 +1132,41 @@ function renderCreation(view) {
           <div class="cc-rewrite-label">✏️ 二创改编建议</div>
           ${item.rewrite}
         </div>
+        <div class="cc-analysis-toggle" onclick="toggleAnalysis(this)">
+          <span class="cc-analysis-arrow">▶</span> 查看完整拆解（拍摄思路/镜头/文案/剪辑）
+        </div>
+        <div class="cc-analysis-detail" style="display:none;">${(item.analysis||'').replace(/\n/g, '<br>')}</div>
         <div class="kc-actions" style="margin-top:8px;">
-          <button class="kc-action-btn" onclick="speak('${item.title.replace(/'/g, "\\'")}')">🔊 听</button>
-          <button class="kc-action-btn" onclick="copyText('${item.title.replace(/'/g, "\\'")}\\n\\n借鉴逻辑：${item.reason.replace(/'/g, "\\'")}')">📋 复制</button>
+          <button class="kc-action-btn kc-video-btn" onclick="showCreationVideo('${safeTitle}', '${safeVideo}', '${safeAnalysis}')">▶️ 观看原视频</button>
+          <button class="kc-action-btn" onclick="speak('${safeTitle}')">🔊 听</button>
+          <button class="kc-action-btn" onclick="copyText('${safeTitle}\\n\\n借鉴逻辑：${safeReason}\\n\\n二创建议：${safeRewrite}')">📋 复制</button>
         </div>
       </div>
     </div>
-  `).join('');
+  `}).join('');
   view.innerHTML = html;
+}
+
+function toggleAnalysis(el) {
+  const detail = el.nextElementSibling;
+  const arrow = el.querySelector('.cc-analysis-arrow');
+  if (detail.style.display === 'none') {
+    detail.style.display = 'block';
+    arrow.textContent = '▼';
+  } else {
+    detail.style.display = 'none';
+    arrow.textContent = '▶';
+  }
+}
+
+function showCreationVideo(title, videoUrl, analysis) {
+  const contentHtml = `
+    <div class="vp-section">
+      <div class="vp-section-title">🎬 完整拆解分析</div>
+      <div class="vp-analysis">${analysis.replace(/\\n/g, '<br>')}</div>
+    </div>
+  `;
+  showVideoPlayer(title, videoUrl, contentHtml);
 }
 
 // ===== 顾客跟进视图 =====
@@ -2150,10 +2230,40 @@ function showModal(html) {
 }
 function closeModal() {
   document.getElementById('modalOverlay').style.display = 'none';
+  // 停止所有视频播放
+  const videos = document.querySelectorAll('#modal video, #modal iframe');
+  videos.forEach(v => { if (v.pause) v.pause(); v.src = ''; });
 }
 document.addEventListener('click', (e) => {
   if (e.target.id === 'modalOverlay') closeModal();
 });
+
+// ===== 视频播放器 =====
+function showVideoPlayer(title, videoUrl, contentHtml) {
+  const bililiUrl = videoUrl || ('https://search.bilibili.com/all?keyword=' + encodeURIComponent(title));
+  const douyinUrl = 'https://www.douyin.com/search/' + encodeURIComponent(title);
+  const xhsUrl = 'https://www.xiaohongshu.com/search_result?keyword=' + encodeURIComponent(title);
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">${title}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="vp-wrapper">
+      <div class="vp-screen" onclick="window.open('${bililiUrl}', '_blank')">
+        <div class="vp-play-icon">▶</div>
+        <div class="vp-play-text">点击播放视频</div>
+        <div class="vp-hint">将在浏览器中打开B站搜索结果</div>
+      </div>
+    </div>
+    <div class="vp-platforms">
+      <button class="vp-btn vp-bili" onclick="window.open('${bililiUrl}', '_blank')">📺 B站观看</button>
+      <button class="vp-btn vp-douyin" onclick="window.open('${douyinUrl}', '_blank')">📱 抖音观看</button>
+      <button class="vp-btn vp-xhs" onclick="window.open('${xhsUrl}', '_blank')">📕 小红书观看</button>
+    </div>
+    ${contentHtml || ''}
+  `;
+  showModal(html);
+}
 
 // ===== 复制文本 =====
 function copyText(text) {
