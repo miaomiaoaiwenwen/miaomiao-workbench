@@ -399,6 +399,11 @@ function renderKnowledgeItems(view, items, title) {
 // ===== 朋友圈文案视图 =====
 function renderMoments(view) {
   const cats = Object.keys(MOMENTS_DATA);
+  const allCount = (MOMENTS_DATA[momentsCategory] || []).length;
+  const state = getMomentsState(momentsCategory);
+  const totalBatches = Math.ceil(allCount / 10);
+  const currentBatch = Math.floor(state.shownCount / 10) + 1;
+
   let html = `
     <div class="refresh-bar">
       <div class="rb-title">朋友圈文案图片</div>
@@ -411,12 +416,13 @@ function renderMoments(view) {
   html += `<div class="category-bar">`;
   html += cats.map(c => `<div class="category-chip ${c === momentsCategory ? 'active' : ''}" onclick="switchMomentsCategory('${c}')">${c}</div>`).join('');
   html += `</div>`;
+  html += `<div class="moments-batch-info">第 ${currentBatch} 批 / 共 ${totalBatches} 批 · 本分类共 ${allCount} 条 · 今日已展示 ${state.shownCount + 10 > allCount ? allCount : state.shownCount + 10} 条</div>`;
   html += renderMomentsList(momentsCategory);
   view.innerHTML = html;
 }
 
 function renderMomentsList(cat) {
-  const items = getDailyMoments(cat, 10);
+  const items = getMomentsBatch(cat, 10, false);
   return `<div id="momentsList">` + items.map(item => `
     <div class="moments-card">
       <img class="mc-image" src="${item.image}" alt="">
@@ -432,21 +438,77 @@ function renderMomentsList(cat) {
   `).join('') + `</div>`;
 }
 
-let momentsRefreshSeed = 0;
-function getDailyMoments(cat, count) {
+// 获取或初始化文案状态（每日重置，跨天不同排序）
+function getMomentsState(cat) {
+  const today = formatDate(new Date());
+  const key = `moments_state_${cat}`;
+  let state = Store.get(key, null);
+
+  if (!state || state.date !== today) {
+    // 新的一天：创建当日洗牌顺序
+    const all = MOMENTS_DATA[cat] || [];
+    const dayIdx = getDayOfYear(new Date());
+    const seed = dayIdx * 1000 + cat.length * 7 + (cat.charCodeAt(0) || 0);
+    const order = [];
+    for (let i = 0; i < all.length; i++) order.push(i);
+    // Fisher-Yates 洗牌（确定性种子，每天不同）
+    let s = seed;
+    for (let i = order.length - 1; i > 0; i--) {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      const j = s % (i + 1);
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    state = { date: today, order: order, shownCount: 0, reshuffleCount: 0 };
+    Store.set(key, state);
+  }
+
+  return state;
+}
+
+// 创建洗牌顺序
+function createShuffleOrder(length, seed) {
+  const order = [];
+  for (let i = 0; i < length; i++) order.push(i);
+  let s = seed;
+  for (let i = order.length - 1; i > 0; i--) {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    const j = s % (i + 1);
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return order;
+}
+
+// 获取文案批次（isRefresh=true 时前进到下一批）
+function getMomentsBatch(cat, count, isRefresh) {
   const all = MOMENTS_DATA[cat] || [];
-  const seed = getDayOfYear(new Date()) + momentsRefreshSeed * 31 + cat.length * 7;
+  if (all.length === 0) return [];
+
+  let state = getMomentsState(cat);
+
+  if (isRefresh) {
+    state.shownCount += count;
+    // 全部展示完毕，重新洗牌
+    if (state.shownCount >= all.length) {
+      state.shownCount = 0;
+      state.reshuffleCount = (state.reshuffleCount || 0) + 1;
+      const dayIdx = getDayOfYear(new Date());
+      const seed = dayIdx * 1000 + cat.length * 7 + (cat.charCodeAt(0) || 0) + state.reshuffleCount * 9999 + 1;
+      state.order = createShuffleOrder(all.length, seed);
+    }
+    Store.set(`moments_state_${cat}`, state);
+  }
+
   const result = [];
   for (let i = 0; i < count; i++) {
-    if (all.length === 0) break;
-    result.push(all[(seed + i) % all.length]);
+    const idx = state.order[(state.shownCount + i) % all.length];
+    result.push(all[idx]);
   }
+
   return result;
 }
 
 function switchMomentsCategory(cat) {
   momentsCategory = cat;
-  momentsRefreshSeed = 0;
   const view = document.getElementById('view-moments');
   renderMoments(view);
 }
@@ -454,12 +516,13 @@ function switchMomentsCategory(cat) {
 function refreshMoments() {
   const btn = document.getElementById('momentsRefresh');
   if (btn) btn.classList.add('spinning');
-  momentsRefreshSeed++;
+
+  // 前进到下一批（自动跳过已展示的）
+  getMomentsBatch(momentsCategory, 10, true);
+
   setTimeout(() => {
-    const listEl = document.getElementById('momentsList');
-    if (listEl) {
-      listEl.outerHTML = renderMomentsList(momentsCategory);
-    }
+    const view = document.getElementById('view-moments');
+    if (view) renderMoments(view);
     if (btn) btn.classList.remove('spinning');
     speak('已更新');
   }, 500);
