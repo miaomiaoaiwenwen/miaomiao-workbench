@@ -720,6 +720,34 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
   .timer-float { max-width: 480px; }
 }
 
+/* ===== 录音模块 ===== */
+.recording-item {
+  background: var(--white); border-radius: var(--radius-sm); padding: 12px 14px;
+  box-shadow: var(--shadow); margin-bottom: 8px;
+}
+.recording-item-header { display: flex; align-items: center; gap: 10px; }
+.recording-item-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #F5F5F5; flex-wrap: wrap; }
+
+/* ===== 音色卡片 ===== */
+.voice-card {
+  cursor: pointer; transition: all 0.2s;
+}
+.voice-card:active { transform: scale(0.98); }
+.voice-card.voice-active {
+  border: 2px solid var(--pink); background: var(--pink-soft);
+}
+
+/* ===== 学习资料 ===== */
+.learning-card {
+  cursor: pointer; transition: all 0.2s;
+}
+.learning-card:active { transform: scale(0.98); background: var(--pink-soft); }
+
+/* ===== 数据台账 ===== */
+.dashboard-stat-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+
 /* ==================== 顾客跟进 ==================== */
 .cust-stats {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;
