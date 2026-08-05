@@ -340,15 +340,42 @@ function init() {
   setInterval(autoBackup, 300000);
 }
 
-// ===== 菜单渲染 =====
+// ===== 折叠分类菜单渲染 =====
 function renderMenu() {
   const menuEl = document.getElementById('drawerMenu');
-  menuEl.innerHTML = MENU.map(m => `
-    <div class="menu-item ${m.id === currentView ? 'active' : ''}" data-view="${m.id}">
-      <span class="menu-icon">${m.icon}</span>
-      <span>${m.name}</span>
-    </div>
-  `).join('');
+  let html = '';
+  MENU_CATEGORIES.forEach(cat => {
+    const isExpanded = cat.expanded;
+    html += `<div class="menu-category" data-cat="${cat.id}">`;
+    html += `<div class="menu-cat-header" data-cat="${cat.id}">`;
+    html += `<span class="menu-cat-icon">${cat.icon}</span>`;
+    html += `<span class="menu-cat-name">${cat.name}</span>`;
+    html += `<span class="menu-cat-arrow ${isExpanded ? 'expanded' : ''}">▶</span>`;
+    html += `</div>`;
+    html += `<div class="menu-cat-children ${isExpanded ? 'expanded' : ''}">`;
+    cat.children.forEach(m => {
+      html += `<div class="menu-item ${m.id === currentView ? 'active' : ''}" data-view="${m.id}">`;
+      html += `<span class="menu-icon">${m.icon}</span>`;
+      html += `<span>${m.name}</span>`;
+      html += `</div>`;
+    });
+    html += `</div></div>`;
+  });
+  menuEl.innerHTML = html;
+
+  // 分类头点击 → 折叠/展开
+  menuEl.querySelectorAll('.menu-cat-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const catId = header.dataset.cat;
+      const category = MENU_CATEGORIES.find(c => c.id === catId);
+      if (category) {
+        category.expanded = !category.expanded;
+        renderMenu(); // 重新渲染以更新箭头和子菜单状态
+      }
+    });
+  });
+
+  // 子菜单项点击
   menuEl.querySelectorAll('.menu-item').forEach(el => {
     el.addEventListener('click', () => {
       switchView(el.dataset.view);
@@ -389,8 +416,9 @@ function setupEvents() {
 function switchView(viewId) {
   currentView = viewId;
   document.querySelectorAll('.view').forEach(v => v.remove());
-  const menu = MENU.find(m => m.id === viewId);
+  const menu = MENU_FLAT[viewId];
   document.getElementById('topbarTitle').textContent = menu ? menu.name : '';
+  // 更新菜单激活状态
   document.querySelectorAll('.menu-item').forEach(el => {
     el.classList.toggle('active', el.dataset.view === viewId);
   });
@@ -404,6 +432,7 @@ function switchView(viewId) {
     case 'daily': renderDaily(view); break;
     case 'customers': renderCustomers(view); break;
     case 'consumption': renderConsumption(view); break;
+    case 'recording_review': renderRecordingReview(view); break;
     case 'skin': renderKnowledge(view, SKIN_DATA, '皮肤专业知识'); break;
     case 'photoelectric': renderKnowledge(view, PHOTO_DATA, '光电专业知识'); break;
     case 'waterlight': renderKnowledge(view, WATER_DATA, '水光产品知识'); break;
@@ -418,9 +447,6 @@ function switchView(viewId) {
     case 'calendar': renderCalendar(view); break;
     case 'accounting': renderAccounting(view); break;
     case 'creation': renderCreation(view); break;
-    case 'recording': renderRecording(view); break;
-    case 'aireview': renderAIReview(view); break;
-    case 'voice': renderVoiceSettings(view); break;
     case 'learning': renderLearning(view); break;
     case 'dashboard': renderDashboard(view); break;
     case 'settings': renderSettings(view); break;
@@ -480,6 +506,27 @@ function renderDaily(view) {
       </div>
     `;
   }
+
+  // ===== 快捷入口卡片 =====
+  html += `<div class="section-title">快捷入口</div>`;
+  html += `<div class="quick-cards">
+    <div class="quick-card" onclick="switchView('daily')">
+      <div class="quick-card-icon qc-pink">📋</div>
+      <div class="quick-card-name">每日工作</div>
+    </div>
+    <div class="quick-card" onclick="switchView('customers')">
+      <div class="quick-card-icon qc-purple">👥</div>
+      <div class="quick-card-name">顾客跟进</div>
+    </div>
+    <div class="quick-card" onclick="switchView('consumption')">
+      <div class="quick-card-icon qc-gold">💳</div>
+      <div class="quick-card-name">顾客消费</div>
+    </div>
+    <div class="quick-card" onclick="switchView('recording_review')">
+      <div class="quick-card-icon qc-teal">🎙️</div>
+      <div class="quick-card-name">录音复盘</div>
+    </div>
+  </div>`;
 
   html += '<div class="section-title">今日任务清单</div>';
   html += tasks.map(t => {
@@ -2381,9 +2428,10 @@ function renderSettings(view) {
       <span class="sr-label">试听语音</span>
       <button class="btn btn-sm btn-outline" onclick="speak('你好，我是你的工作助手，有什么可以帮你的吗')">🔊 试听</button>
     </div>
+    <button class="btn btn-outline btn-full btn-sm" onclick="showVoicePresetModal()" style="margin-bottom:8px;">🎵 12款音色选择与调节</button>
     <div class="card" style="margin-top:8px;">
       <div style="font-size:13px;color:var(--text-light);line-height:1.8;">
-        🎵 语音采用柔和女声，语速舒缓<br>
+        🎵 已内置12款原创合规音色（男声6款 + 女声6款）<br>
         📱 所有数据保存在本地浏览器中<br>
         ⏰ 未完成任务12:00和16:00自动提醒
       </div>
@@ -2884,10 +2932,38 @@ let recordingTimer = null;
 let isRecording = false;
 
 // ===== 录音模块 =====
-function renderRecording(view) {
-  const recordings = Store.get('recordings', []);
-  let html = `<div class="section-title">🎙️ 面诊录音</div>`;
+// ===== 录音复盘合并视图 =====
+let reviewTab = 'recording'; // 'recording' | 'review'
+function renderRecordingReview(view) {
+  let html = `<div class="section-title">🎙️ 录音复盘</div>`;
+  // Tab 切换
+  html += `<div class="review-tabs">
+    <div class="review-tab ${reviewTab === 'recording' ? 'active' : ''}" onclick="switchReviewTab('recording')">🎙️ 录音转写</div>
+    <div class="review-tab ${reviewTab === 'review' ? 'active' : ''}" onclick="switchReviewTab('review')">🤖 AI复盘</div>
+  </div><div id="reviewTabContent"></div>`;
+  view.innerHTML = html;
+  renderReviewTabContent();
+}
+function switchReviewTab(tab) {
+  reviewTab = tab;
+  renderReviewTabContent();
+}
+function renderReviewTabContent() {
+  const container = document.getElementById('reviewTabContent');
+  if (!container) return;
+  if (reviewTab === 'recording') {
+    // 复用录音功能渲染
+    renderRecordingContent(container);
+  } else {
+    // 复用复盘功能渲染
+    renderAIReviewContent(container);
+  }
+}
 
+// ===== 面诊录音（原 renderRecording 内容提取）=====
+function renderRecordingContent(container) {
+  const recordings = Store.get('recordings', []);
+  let html = '';
   // 录音控制区
   html += `
     <div class="card" style="text-align:center;padding:20px;">
@@ -2905,7 +2981,6 @@ function renderRecording(view) {
       </div>
     </div>
   `;
-
   // 录音列表
   if (recordings.length > 0) {
     html += `<div class="section-title">历史录音 (${recordings.length})</div>`;
@@ -2935,10 +3010,63 @@ function renderRecording(view) {
   } else {
     html += `<div class="empty-state"><div class="es-icon">🎙️</div><div class="es-text">暂无录音记录</div></div>`;
   }
-
-  view.innerHTML = html;
-  // 如果正在录音，更新UI
+  container.innerHTML = html;
   if (isRecording) updateRecordingUI();
+}
+
+// ===== AI复盘内容渲染（原 renderAIReview 内容提取）=====
+function renderAIReviewContent(container) {
+  const recordings = Store.get('recordings', []);
+  const reviews = Store.get('reviewReports', []);
+  const hasTranscripts = recordings.filter(r => r.transcript && r.transcript.length > 0);
+  let html = '';
+  html += `
+    <div class="card" style="text-align:center;padding:16px;">
+      <div style="font-size:36px;margin-bottom:6px;">🤖</div>
+      <div style="font-size:14px;font-weight:700;">AI智能谈单分析</div>
+      <div style="font-size:12px;color:var(--text-light);margin-top:4px;line-height:1.6;">
+        自动分析谈单文稿<br>标注沟通短板 · 优化话术建议 · 生成复盘小结
+      </div>
+    </div>
+  `;
+  if (hasTranscripts.length > 0) {
+    html += `<div class="section-title">选择文稿进行分析 (${hasTranscripts.length}份可用)</div>`;
+    [...hasTranscripts].reverse().forEach(r => {
+      const hasReview = reviews.some(rv => rv.recordingId === r.id);
+      html += `
+        <div class="card" style="padding:12px 14px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <div>
+              <div style="font-weight:700;font-size:14px;">${r.customerName || '未关联顾客'}</div>
+              <div style="font-size:12px;color:var(--text-light);">${r.date} · ${r.transcript ? r.transcript.length+'字' : ''}</div>
+            </div>
+            <button class="btn btn-sm ${hasReview ? 'btn-outline' : 'btn-primary'}" onclick="runAIReview('${r.id}')">${hasReview ? '📋 查看报告' : '🤖 开始分析'}</button>
+          </div>
+        </div>
+      `;
+    });
+  } else {
+    html += `<div class="empty-state"><div class="es-icon">📝</div><div class="es-text">暂无已转写的录音文稿<br>请在「录音转写」中先转写录音</div></div>`;
+  }
+  if (reviews.length > 0) {
+    html += `<div class="section-title">历史复盘报告 (${reviews.length})</div>`;
+    [...reviews].reverse().forEach(rv => {
+      html += `
+        <div class="card" style="padding:12px 14px;">
+          <div style="font-weight:700;font-size:14px;">📋 ${rv.customerName || '复盘报告'}</div>
+          <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">${rv.date} · 沟通短板${rv.issues ? rv.issues.length : 0}处</div>
+          <div style="font-size:13px;color:var(--text);line-height:1.6;max-height:80px;overflow:hidden;">${rv.summary || ''}</div>
+          <button class="btn btn-sm btn-outline" style="margin-top:8px;" onclick="showReviewDetail('${rv.id}')">📄 查看完整报告</button>
+        </div>
+      `;
+    });
+  }
+  container.innerHTML = html;
+}
+
+// 保留旧接口以兼容内部回调，委托给新渲染器
+function renderRecording(view) {
+  renderRecordingContent(view);
 }
 
 function startRecording() {
@@ -3246,60 +3374,9 @@ function deleteRecording(id) {
 }
 
 // ===== AI智能谈单复盘 =====
+// 保留旧接口以兼容内部回调，委托给新渲染器
 function renderAIReview(view) {
-  const recordings = Store.get('recordings', []);
-  const reviews = Store.get('reviewReports', []);
-  const hasTranscripts = recordings.filter(r => r.transcript && r.transcript.length > 0);
-
-  let html = `<div class="section-title">🤖 AI谈单复盘</div>`;
-  html += `
-    <div class="card" style="text-align:center;padding:16px;">
-      <div style="font-size:36px;margin-bottom:6px;">🤖</div>
-      <div style="font-size:14px;font-weight:700;">AI智能谈单分析</div>
-      <div style="font-size:12px;color:var(--text-light);margin-top:4px;line-height:1.6;">
-        自动分析谈单文稿<br>标注沟通短板 · 优化话术建议 · 生成复盘小结
-      </div>
-    </div>
-  `;
-
-  // 可选择录音进行分析
-  if (hasTranscripts.length > 0) {
-    html += `<div class="section-title">选择文稿进行分析 (${hasTranscripts.length}份可用)</div>`;
-    [...hasTranscripts].reverse().forEach(r => {
-      const hasReview = reviews.some(rv => rv.recordingId === r.id);
-      html += `
-        <div class="card" style="padding:12px 14px;">
-          <div style="display:flex;align-items:center;justify-content:space-between;">
-            <div>
-              <div style="font-weight:700;font-size:14px;">${r.customerName || '未关联顾客'}</div>
-              <div style="font-size:12px;color:var(--text-light);">${r.date} · ${r.transcript ? r.transcript.length+'字' : ''}</div>
-            </div>
-            <button class="btn btn-sm ${hasReview ? 'btn-outline' : 'btn-primary'}" onclick="runAIReview('${r.id}')">${hasReview ? '📋 查看报告' : '🤖 开始分析'}</button>
-          </div>
-        </div>
-      `;
-    });
-  } else {
-    html += `<div class="empty-state"><div class="es-icon">📝</div><div class="es-text">暂无已转写的录音文稿<br>请先在「面诊录音」中转写录音</div></div>`;
-  }
-
-  // 历史复盘
-  if (reviews.length > 0) {
-    html += `<div class="section-title">历史复盘报告 (${reviews.length})</div>`;
-    [...reviews].reverse().forEach(rv => {
-      html += `
-        <div class="card" style="padding:12px 14px;">
-          <div style="font-weight:700;font-size:14px;">📋 ${rv.customerName || '复盘报告'}</div>
-          <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">${rv.date} · 沟通短板${rv.issues ? rv.issues.length : 0}处</div>
-          <div style="font-size:13px;color:var(--text);line-height:1.6;max-height:80px;overflow:hidden;" id="review-summary-${rv.id}">
-            ${rv.summary || ''}
-          </div>
-          <button class="btn btn-sm btn-outline" style="margin-top:8px;" onclick="showReviewDetail('${rv.id}')">📄 查看完整报告</button>
-        </div>
-      `;
-    });
-  }
-  view.innerHTML = html;
+  renderAIReviewContent(view);
 }
 
 function runAIReview(recordingId) {
@@ -3568,12 +3645,23 @@ function renderVoiceSettings(view) {
   view.innerHTML = html;
 }
 
+// 从设置页打开音色选择弹窗
+function showVoicePresetModal() {
+  showModal('<div id="voicePresetModalContent" style="max-height:70vh;overflow-y:auto;"></div>');
+  const content = document.getElementById('voicePresetModalContent');
+  if (content) renderVoiceSettings(content);
+  // 修改 modal 样式适配
+  const modal = document.getElementById('modal');
+  if (modal) modal.style.maxWidth = '420px';
+}
+
 function selectVoicePreset(presetId) {
   const prefs = Store.get('voicePrefs', { presetId: 'v_female_elegant', rate: 0.85, volume: 1.0 });
   prefs.presetId = presetId;
   Store.set('voicePrefs', prefs);
-  const view = document.getElementById('view-voice');
-  if (view) renderVoiceSettings(view);
+  // 如果在弹窗中打开，刷新弹窗内容
+  const modalContent = document.getElementById('voicePresetModalContent');
+  if (modalContent) renderVoiceSettings(modalContent);
   const preset = VOICE_PRESETS.find(p => p.id === presetId);
   if (preset) {
     speak('已切换到 ' + preset.name, prefs.rate || 0.85, prefs.volume || 1.0, preset.pitch);
