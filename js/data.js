@@ -1,31 +1,67 @@
 /* ==================== 数据文件 ==================== */
 
-// 菜单结构
-const MENU = [
-  { id: 'daily', icon: '📋', name: '每日工作' },
-  { id: 'customers', icon: '👥', name: '顾客跟进' },
-  { id: 'consumption', icon: '💳', name: '顾客消费' },
-  { id: 'skin', icon: '🧴', name: '皮肤专业' },
-  { id: 'photoelectric', icon: '💡', name: '光电专业' },
-  { id: 'waterlight', icon: '💧', name: '水光产品' },
-  { id: 'injection', icon: '💉', name: '注射微整' },
-  { id: 'ingredient', icon: '🌿', name: '护肤成分' },
-  { id: 'aesthetic', icon: '🎨', name: '美学设计' },
-  { id: 'moments', icon: '📱', name: '朋友圈文案' },
-  { id: 'exercise', icon: '🏃', name: '运动拉伸' },
-  { id: 'english', icon: '📖', name: '英语学习' },
-  { id: 'finance', icon: '💰', name: '财经资讯' },
-  { id: 'psychology', icon: '🧠', name: '心理学知识' },
-  { id: 'calendar', icon: '📅', name: '任务日历' },
-  { id: 'accounting', icon: '💵', name: '记账功能' },
-  { id: 'creation', icon: '🎬', name: '内容创作' },
-  { id: 'recording', icon: '🎙️', name: '面诊录音' },
-  { id: 'aireview', icon: '🤖', name: 'AI谈单复盘' },
-  { id: 'voice', icon: '🔊', name: '音色播报' },
-  { id: 'learning', icon: '📚', name: '学习资料库' },
-  { id: 'dashboard', icon: '📊', name: '数据台账' },
-  { id: 'settings', icon: '⚙️', name: '设置' },
+// ===== 折叠式分类菜单结构 =====
+const MENU_CATEGORIES = [
+  {
+    id: 'cat_business',
+    icon: '💼',
+    name: '业务核心模块',
+    expanded: true, // 默认展开
+    children: [
+      { id: 'daily', icon: '📋', name: '每日工作' },
+      { id: 'customers', icon: '👥', name: '顾客跟进' },
+      { id: 'consumption', icon: '💳', name: '顾客消费' },
+      { id: 'recording_review', icon: '🎙️', name: '录音复盘' },
+      { id: 'dashboard', icon: '📊', name: '数据台账' },
+    ],
+  },
+  {
+    id: 'cat_knowledge',
+    icon: '📖',
+    name: '医美专业知识库',
+    expanded: false,
+    children: [
+      { id: 'skin', icon: '🧴', name: '皮肤专业' },
+      { id: 'photoelectric', icon: '💡', name: '光电专业' },
+      { id: 'waterlight', icon: '💧', name: '水光产品' },
+      { id: 'injection', icon: '💉', name: '注射微整' },
+      { id: 'ingredient', icon: '🌿', name: '护肤成分' },
+      { id: 'aesthetic', icon: '🎨', name: '美学设计' },
+      { id: 'learning', icon: '📚', name: '学习资料库' },
+    ],
+  },
+  {
+    id: 'cat_content',
+    icon: '✍️',
+    name: '素材文案创作',
+    expanded: false,
+    children: [
+      { id: 'moments', icon: '📱', name: '朋友圈文案' },
+      { id: 'creation', icon: '🎬', name: '内容创作' },
+      { id: 'exercise', icon: '🏃', name: '运动拉伸' },
+    ],
+  },
+  {
+    id: 'cat_tools',
+    icon: '🧰',
+    name: '个人成长与工具',
+    expanded: false,
+    children: [
+      { id: 'english', icon: '📖', name: '英语学习' },
+      { id: 'finance', icon: '💰', name: '财经资讯' },
+      { id: 'psychology', icon: '🧠', name: '心理学知识' },
+      { id: 'calendar', icon: '📅', name: '任务日历' },
+      { id: 'accounting', icon: '💵', name: '记账功能' },
+      { id: 'settings', icon: '⚙️', name: '系统设置' },
+    ],
+  },
 ];
+
+// 扁平化菜单查找表（向后兼容 switchView 等）
+const MENU_FLAT = {};
+MENU_CATEGORIES.forEach(cat => {
+  cat.children.forEach(m => { MENU_FLAT[m.id] = m; });
+});
 
 // 默认每日任务
 const DEFAULT_TASKS = [
