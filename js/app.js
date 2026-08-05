@@ -13,12 +13,18 @@ let momentsCategory = '专业科普';
 let exerciseCategory = '全身';
 
 // ===== LocalStorage 管理 =====
+let _backupTimer = null;
 const Store = {
   get(key, def) {
     try { const v = localStorage.getItem('mm_' + key); return v ? JSON.parse(v) : def; }
     catch(e) { return def; }
   },
-  set(key, val) { localStorage.setItem('mm_' + key, JSON.stringify(val)); },
+  set(key, val) {
+    localStorage.setItem('mm_' + key, JSON.stringify(val));
+    // 延迟自动备份（防抖，避免频繁写入）
+    if (_backupTimer) clearTimeout(_backupTimer);
+    _backupTimer = setTimeout(() => autoBackup(), 2000);
+  },
   del(key) { localStorage.removeItem('mm_' + key); }
 };
 
@@ -31,8 +37,12 @@ function init() {
   setupEvents();
   switchView('daily');
   checkReminders();
+  // 启动时自动备份 + 检查备份状态
+  autoBackup();
   // 每分钟检查提醒
   setInterval(checkReminders, 60000);
+  // 每5分钟自动备份一次
+  setInterval(autoBackup, 300000);
 }
 
 // ===== 菜单渲染 =====
@@ -2082,13 +2092,24 @@ function renderSettings(view) {
 
   html += `<div class="section-title">数据管理</div>`;
   html += `
+    <div class="card" style="margin-bottom:8px;border:1px solid #FFD1DC;background:#FFF5F8;">
+      <div style="font-size:13px;color:var(--text-light);line-height:1.8;">
+        ⚠️ <b>重要提醒</b><br>
+        📱 数据保存在浏览器本地，更换浏览器/清理缓存/长时间不访问可能导致数据丢失<br>
+        💾 建议<span style="color:var(--pink);font-weight:bold;">每周导出一次</span>数据备份到手机<br>
+        🔄 已开启自动备份（本地双重存储）
+      </div>
+    </div>
     <div class="card">
-      <button class="btn btn-outline btn-full btn-sm" onclick="exportData()" style="margin-bottom:8px;">📤 导出数据</button>
+      <button class="btn btn-primary btn-full btn-sm" onclick="exportData()" style="margin-bottom:8px;">📤 导出数据备份</button>
+      <button class="btn btn-outline btn-full btn-sm" onclick="importData()" style="margin-bottom:8px;">📥 导入数据恢复</button>
+      <div id="backupInfo" style="font-size:12px;color:var(--text-light);text-align:center;margin:8px 0;">检查中...</div>
       <button class="btn btn-outline btn-full btn-sm" style="border-color:var(--red);color:var(--red);" onclick="resetData()">🗑 清空所有数据</button>
     </div>
   `;
 
   view.innerHTML = html;
+  checkBackup();
 }
 
 function addTask() {
@@ -2178,6 +2199,110 @@ function exportData() {
   a.download = '妙妙工作台_数据_' + todayKey() + '.json';
   a.click();
   speak('已导出');
+}
+
+// ===== 自动备份（双重存储）=====
+const BACKUP_KEY = 'mm_backup';
+const BACKUP_TIME_KEY = 'mm_backup_time';
+const DATA_KEYS = ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers', 'consumption'];
+
+function autoBackup() {
+  try {
+    const data = {};
+    let hasData = false;
+    DATA_KEYS.forEach(k => {
+      data[k] = Store.get(k);
+      if (data[k] !== null && data[k] !== undefined) hasData = true;
+    });
+    if (hasData) {
+      localStorage.setItem(BACKUP_KEY, JSON.stringify(data));
+      localStorage.setItem(BACKUP_TIME_KEY, new Date().toISOString());
+    }
+  } catch(e) { console.warn('Auto backup failed:', e); }
+}
+
+// 检查备份状态并尝试恢复
+function checkBackup() {
+  const backupInfo = document.getElementById('backupInfo');
+  if (!backupInfo) return;
+
+  const backupRaw = localStorage.getItem(BACKUP_KEY);
+  const backupTime = localStorage.getItem(BACKUP_TIME_KEY);
+
+  // 检查当前是否有数据
+  let currentDataCount = 0;
+  DATA_KEYS.forEach(k => {
+    const v = Store.get(k);
+    if (v && (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0)) {
+      currentDataCount++;
+    }
+  });
+
+  if (backupRaw && backupTime) {
+    const time = new Date(backupTime);
+    const timeStr = time.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const backupSize = backupRaw.length;
+
+    if (currentDataCount === 0) {
+      // 当前无数据但有备份 → 提示恢复
+      backupInfo.innerHTML = `⚠️ 发现备份（${timeStr}，${(backupSize/1024).toFixed(1)}KB）<br><button class="btn btn-sm btn-primary" style="margin-top:6px;" onclick="restoreFromBackup()">🔄 恢复备份数据</button>`;
+    } else {
+      backupInfo.innerHTML = `✅ 上次备份：${timeStr}（${(backupSize/1024).toFixed(1)}KB）`;
+    }
+  } else {
+    backupInfo.innerHTML = '📭 暂无备份记录，建议立即导出';
+  }
+}
+
+function restoreFromBackup() {
+  const backupRaw = localStorage.getItem(BACKUP_KEY);
+  if (!backupRaw) { showToast('未找到备份数据'); return; }
+  try {
+    const data = JSON.parse(backupRaw);
+    let restored = 0;
+    DATA_KEYS.forEach(k => {
+      if (data[k] !== null && data[k] !== undefined) {
+        Store.set(k, data[k]);
+        restored++;
+      }
+    });
+    showToast('✅ 已从备份恢复 ' + restored + ' 项数据');
+    speak('数据已恢复');
+    setTimeout(() => location.reload(), 1500);
+  } catch(e) {
+    showToast('备份文件损坏，无法恢复');
+  }
+}
+
+function importData() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      try {
+        const data = JSON.parse(ev.target.result);
+        let restored = 0;
+        DATA_KEYS.forEach(k => {
+          if (data[k] !== null && data[k] !== undefined) {
+            Store.set(k, data[k]);
+            restored++;
+          }
+        });
+        autoBackup(); // 立即备份
+        showToast('✅ 成功导入 ' + restored + ' 项数据');
+        speak('数据已导入');
+        setTimeout(() => location.reload(), 1500);
+      } catch(err) {
+        showToast('❌ 文件格式错误，无法导入');
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
 }
 
 function resetData() {
