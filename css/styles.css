@@ -99,6 +99,54 @@ html, body {
 .stat-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .stat-pink { background: var(--pink); }
 
+/* 折叠分类菜单 */
+.menu-category { margin-bottom: 4px; }
+.menu-cat-header {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  cursor: pointer; border-radius: var(--radius-sm);
+  transition: all 0.15s; font-size: 14px; font-weight: 600;
+  color: var(--text); user-select: none;
+}
+.menu-cat-header:active { background: rgba(255,107,157,0.08); }
+.menu-cat-icon { font-size: 18px; width: 24px; text-align: center; flex-shrink: 0; }
+.menu-cat-name { flex: 1; }
+.menu-cat-arrow { font-size: 10px; transition: transform 0.2s; color: var(--text-light); flex-shrink: 0; }
+.menu-cat-arrow.expanded { transform: rotate(90deg); }
+.menu-cat-children { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+.menu-cat-children.expanded { max-height: 800px; }
+.menu-cat-children .menu-item { padding-left: 42px; }
+
+/* 快捷入口卡片 */
+.quick-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+.quick-card {
+  background: var(--white); border-radius: var(--radius); padding: 16px 12px;
+  text-align: center; cursor: pointer; box-shadow: var(--shadow);
+  transition: all 0.2s; display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.quick-card:active { transform: scale(0.96); box-shadow: var(--shadow-hover); }
+.quick-card-icon {
+  width: 50px; height: 50px; border-radius: 14px; display: flex;
+  align-items: center; justify-content: center; font-size: 24px;
+}
+.qc-pink { background: linear-gradient(135deg, #FFE0EC, #FFB8D0); }
+.qc-purple { background: linear-gradient(135deg, #F3E5F5, #E1BEE7); }
+.qc-gold { background: linear-gradient(135deg, #FFF8E1, #FFE082); }
+.qc-teal { background: linear-gradient(135deg, #E0F7FA, #80DEEA); }
+.quick-card-name { font-size: 13px; font-weight: 600; color: var(--text); }
+
+/* 录音复盘 Tabs */
+.review-tabs {
+  display: flex; background: var(--white); border-radius: var(--radius);
+  margin-bottom: 12px; overflow: hidden; box-shadow: var(--shadow);
+}
+.review-tab {
+  flex: 1; text-align: center; padding: 12px 8px; font-size: 14px; font-weight: 600;
+  cursor: pointer; transition: all 0.2s; color: var(--text-light);
+  border-bottom: 3px solid transparent;
+}
+.review-tab.active { color: var(--pink); border-bottom-color: var(--pink); background: var(--pink-soft); }
+.review-tab:active { background: rgba(255,107,157,0.08); }
+
 /* ==================== 主内容区 ==================== */
 .content {
   margin-top: calc(var(--topbar-h) + var(--safe-top));
