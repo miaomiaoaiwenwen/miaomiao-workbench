@@ -14,6 +14,9 @@ let exerciseCategory = '全身';
 
 // ===== LocalStorage 管理 =====
 let _backupTimer = null;
+let _cloudSyncTimer = null;
+const DATA_KEYS = ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers', 'consumption'];
+
 const Store = {
   get(key, def) {
     try { const v = localStorage.getItem('mm_' + key); return v ? JSON.parse(v) : def; }
@@ -24,9 +27,272 @@ const Store = {
     // 延迟自动备份（防抖，避免频繁写入）
     if (_backupTimer) clearTimeout(_backupTimer);
     _backupTimer = setTimeout(() => autoBackup(), 2000);
+    // 延迟云端同步（防抖，避免频繁请求）
+    if (_cloudSyncTimer) clearTimeout(_cloudSyncTimer);
+    _cloudSyncTimer = setTimeout(() => pushToCloud(), 5000);
   },
   del(key) { localStorage.removeItem('mm_' + key); }
 };
+
+// ===== 云端同步模块 =====
+const CLOUD_OWNER = 'miaomiaoaiwenwen';
+const CLOUD_REPO = 'miaomiao-workbench';
+const CLOUD_BRANCH = 'main';
+const CLOUD_ENCRYPT_KEY = 'mm-workbench-2026-cloud-aes-secure';
+const CLOUD_CURRENT = 'cloud-data/current.json';
+const CLOUD_BACKUP_DIR = 'cloud-data/backups';
+
+const CloudSync = {
+  // ===== Token 管理 =====
+  getToken() {
+    return Store.get('cloudToken', '');
+  },
+  setToken(t) {
+    if (t) { Store.set('cloudToken', t); }
+  },
+  isConnected() {
+    return !!this.getToken();
+  },
+
+  // ===== 加密/解密 =====
+  encrypt(obj) {
+    try {
+      const json = JSON.stringify(obj);
+      return CryptoJS.AES.encrypt(json, CLOUD_ENCRYPT_KEY).toString();
+    } catch(e) { console.error('加密失败:', e); return null; }
+  },
+  decrypt(encrypted) {
+    try {
+      let ciphertext = String(encrypted).replace(/[\n\r]/g, '');
+      const bytes = CryptoJS.AES.decrypt(ciphertext, CLOUD_ENCRYPT_KEY);
+      const json = bytes.toString(CryptoJS.enc.Utf8);
+      if (!json) throw new Error('空解密');
+      return JSON.parse(json);
+    } catch(e) { console.error('解密失败:', e); return null; }
+  },
+
+  // ===== 数据打包/恢复 =====
+  packAll() {
+    const data = {};
+    DATA_KEYS.forEach(k => { data[k] = Store.get(k); });
+    data._timestamp = Date.now();
+    data._version = '1.0';
+    return data;
+  },
+  restoreAll(data) {
+    let count = 0;
+    DATA_KEYS.forEach(k => {
+      if (data[k] !== undefined && data[k] !== null) {
+        Store.set(k, data[k]);
+        count++;
+      }
+    });
+    return count;
+  },
+
+  // ===== GitHub API 封装 =====
+  async _api(method, path, body) {
+    const token = this.getToken();
+    if (!token) throw new Error('TOKEN_NOT_SET');
+    const url = `https://api.github.com/repos/${CLOUD_OWNER}/${CLOUD_REPO}/contents/${path}`;
+    const headers = { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github+json' };
+    const opts = { method, headers };
+    if (body) {
+      opts.body = JSON.stringify(body);
+      headers['Content-Type'] = 'application/json';
+    }
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (res.status === 401) { Store.del('cloudToken'); throw new Error('TOKEN_INVALID'); }
+      if (res.status === 404) return null;
+      throw new Error(err.message || `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+
+  // ===== 推送到云端 =====
+  async push() {
+    if (!this.isConnected()) return { ok: false, reason: '未设置Token' };
+    try {
+      const data = this.packAll();
+      const encrypted = this.encrypt(data);
+      if (!encrypted) return { ok: false, reason: '加密失败' };
+
+      let sha = null;
+      try {
+        const file = await this._api('GET', CLOUD_CURRENT);
+        if (file) sha = file.sha;
+      } catch(e) { /* 首次上传 */ }
+
+      const b64 = btoa(unescape(encodeURIComponent(encrypted)));
+      await this._api('PUT', CLOUD_CURRENT, {
+        message: `☁️ 增量同步 ${new Date().toLocaleString('zh-CN')}`,
+        content: b64, sha: sha, branch: CLOUD_BRANCH
+      });
+
+      Store.set('cloudLastSync', Date.now());
+      console.log('☁️ 云端同步成功', new Date().toLocaleString('zh-CN'));
+      return { ok: true };
+    } catch(e) {
+      console.error('云端推送失败:', e.message);
+      return { ok: false, reason: e.message };
+    }
+  },
+
+  // ===== 从云端拉取 =====
+  async pull() {
+    if (!this.isConnected()) return { ok: false, reason: '未设置Token' };
+    try {
+      const file = await this._api('GET', CLOUD_CURRENT);
+      if (!file) return { ok: false, reason: '云端无数据' };
+
+      const b64 = String(file.content).replace(/[\n\r]/g, '');
+      const encrypted = decodeURIComponent(escape(atob(b64)));
+      const data = this.decrypt(encrypted);
+      if (!data) return { ok: false, reason: '解密失败' };
+
+      return { ok: true, data, cloudTime: file.sha };
+    } catch(e) {
+      return { ok: false, reason: e.message };
+    }
+  },
+
+  // ===== 备份列表 =====
+  async listBackups() {
+    if (!this.isConnected()) return [];
+    try {
+      const files = await this._api('GET', CLOUD_BACKUP_DIR);
+      if (!files || !Array.isArray(files)) return [];
+      return files
+        .filter(f => f.name.endsWith('.json'))
+        .sort((a, b) => b.name.localeCompare(a.name))
+        .map(f => ({
+          name: f.name,
+          path: f.path,
+          size: f.size,
+          label: f.name.replace('.json', ''),
+          sha: f.sha
+        }));
+    } catch(e) {
+      return [];
+    }
+  },
+
+  // ===== 创建备份 =====
+  async createBackup() {
+    if (!this.isConnected()) return { ok: false, reason: '未设置Token' };
+    try {
+      const data = this.packAll();
+      const encrypted = this.encrypt(data);
+      if (!encrypted) return { ok: false, reason: '加密失败' };
+
+      const now = new Date();
+      const ts = [now.getFullYear(),
+        String(now.getMonth()+1).padStart(2,'0'),
+        String(now.getDate()).padStart(2,'0')].join('-') + '-' +
+        String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0');
+      const filename = `${CLOUD_BACKUP_DIR}/${ts}.json`;
+
+      const b64 = btoa(unescape(encodeURIComponent(encrypted)));
+      await this._api('PUT', filename, {
+        message: `📦 全量备份 ${ts}`,
+        content: b64, branch: CLOUD_BRANCH
+      });
+
+      return { ok: true, name: ts };
+    } catch(e) {
+      return { ok: false, reason: e.message };
+    }
+  },
+
+  // ===== 从指定备份恢复 =====
+  async restore(filepath) {
+    if (!this.isConnected()) return { ok: false, reason: '未设置Token' };
+    try {
+      const file = await this._api('GET', filepath);
+      if (!file) return { ok: false, reason: '备份不存在' };
+
+      const b64 = String(file.content).replace(/[\n\r]/g, '');
+      const encrypted = decodeURIComponent(escape(atob(b64)));
+      const data = this.decrypt(encrypted);
+      if (!data) return { ok: false, reason: '解密失败' };
+
+      const count = this.restoreAll(data);
+      await this.push(); // 恢复后立即同步到 current
+      return { ok: true, count };
+    } catch(e) {
+      return { ok: false, reason: e.message };
+    }
+  },
+
+  // ===== 验证 Token =====
+  async verifyToken(token) {
+    try {
+      const url = `https://api.github.com/user`;
+      const res = await fetch(url, { headers: { 'Authorization': `token ${token}` } });
+      if (!res.ok) return false;
+      const user = await res.json();
+      return user.login === CLOUD_OWNER;
+    } catch(e) { return false; }
+  }
+};
+
+// ===== 云端同步对外接口（非async, 由调用方处理） =====
+function pushToCloud() {
+  if (!CloudSync.isConnected()) return;
+  CloudSync.push().then(r => {
+    if (r.ok) updateCloudSyncUI();
+  }).catch(() => {});
+}
+
+async function pullFromCloud() {
+  if (!CloudSync.isConnected()) return;
+  const r = await CloudSync.pull();
+  if (r.ok && r.data) {
+    // 比较时间戳
+    const cloudTime = r.data._timestamp || 0;
+    const localSyncTime = Store.get('cloudLastSync', 0);
+    if (!localSyncTime || cloudTime > localSyncTime) {
+      const count = CloudSync.restoreAll(r.data);
+      return { updated: true, count };
+    }
+  }
+  return { updated: false };
+}
+
+// ===== 启动时云端检查 =====
+async function initCloudSync() {
+  if (!CloudSync.isConnected()) return;
+  try {
+    // 检查本地是否有实质数据
+    let hasLocal = false;
+    const customers = Store.get('customers', []);
+    const consumption = Store.get('consumption', []);
+    const accounting = Store.get('accounting', []);
+    if ((customers && customers.length > 0) || (consumption && consumption.length > 0) || (accounting && accounting.length > 0)) {
+      hasLocal = true;
+    }
+
+    const r = await CloudSync.pull();
+    if (r.ok && r.data) {
+      if (!hasLocal) {
+        // 本地无数据，从云端恢复
+        const count = CloudSync.restoreAll(r.data);
+        showToast(`☁️ 已从云端恢复 ${count} 项数据`);
+        setTimeout(() => location.reload(), 1500);
+      } else {
+        // 本地有数据，推送到云端
+        await CloudSync.push();
+      }
+    } else if (hasLocal) {
+      // 云端无数据但本地有，首次推送
+      await CloudSync.push();
+    }
+  } catch(e) {
+    console.warn('启动云端同步失败:', e);
+  }
+}
 
 // 获取今日日期键
 function todayKey() { return formatDate(new Date()); }
@@ -39,6 +305,8 @@ function init() {
   checkReminders();
   // 启动时自动备份 + 检查备份状态
   autoBackup();
+  // 启动时从云端拉取数据
+  initCloudSync();
   // 每分钟检查提醒
   setInterval(checkReminders, 60000);
   // 每5分钟自动备份一次
@@ -2095,13 +2363,35 @@ function renderSettings(view) {
     <div class="card" style="margin-bottom:8px;border:1px solid #FFD1DC;background:#FFF5F8;">
       <div style="font-size:13px;color:var(--text-light);line-height:1.8;">
         ⚠️ <b>重要提醒</b><br>
-        📱 数据保存在浏览器本地，更换浏览器/清理缓存/长时间不访问可能导致数据丢失<br>
-        💾 建议<span style="color:var(--pink);font-weight:bold;">每周导出一次</span>数据备份到手机<br>
-        🔄 已开启自动备份（本地双重存储）
+        ☁️ 已开启云端同步，数据实时备份至独立云空间<br>
+        💾 建议<span style="color:var(--pink);font-weight:bold;">每周导出一次</span>本地备份到手机
       </div>
     </div>
+  `;
+
+  // 云端同步区域
+  html += `<div class="section-title">☁️ 云端同步</div>`;
+  const isConnected = CloudSync.isConnected();
+  const lastSync = Store.get('cloudLastSync', 0);
+  html += `
+    <div class="card" id="cloudSyncCard">
+      <div id="cloudStatus" style="font-size:13px;margin-bottom:10px;">
+        ${isConnected
+          ? `✅ 已连接 · 上次同步：${lastSync ? new Date(lastSync).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '暂无'}`
+          : `⚠️ 未连接 · 请设置GitHub Token开启云端同步</div>`
+        }
+      </div>
+      <button class="btn btn-outline btn-full btn-sm" onclick="showCloudTokenModal()" style="margin-bottom:8px;">🔑 设置云端Token</button>
+      <button class="btn btn-primary btn-full btn-sm" onclick="cloudSyncNow()" style="margin-bottom:8px;">☁️ 立即同步</button>
+      <button class="btn btn-outline btn-full btn-sm" onclick="cloudCreateBackup()" style="margin-bottom:8px;">📦 创建备份包</button>
+      ${isConnected ? '<button class="btn btn-outline btn-full btn-sm" onclick="loadCloudBackups()">📋 查看备份记录</button>' : ''}
+    </div>
+    <div id="cloudBackupList" style="margin-top:8px;"></div>
+  `;
+
+  html += `
     <div class="card">
-      <button class="btn btn-primary btn-full btn-sm" onclick="exportData()" style="margin-bottom:8px;">📤 导出数据备份</button>
+      <button class="btn btn-primary btn-full btn-sm" onclick="exportData()" style="margin-bottom:8px;">📤 导出本地备份</button>
       <button class="btn btn-outline btn-full btn-sm" onclick="importData()" style="margin-bottom:8px;">📥 导入数据恢复</button>
       <div id="backupInfo" style="font-size:12px;color:var(--text-light);text-align:center;margin:8px 0;">检查中...</div>
       <button class="btn btn-outline btn-full btn-sm" style="border-color:var(--red);color:var(--red);" onclick="resetData()">🗑 清空所有数据</button>
@@ -2204,7 +2494,6 @@ function exportData() {
 // ===== 自动备份（双重存储）=====
 const BACKUP_KEY = 'mm_backup';
 const BACKUP_TIME_KEY = 'mm_backup_time';
-const DATA_KEYS = ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers', 'consumption'];
 
 function autoBackup() {
   try {
@@ -2310,6 +2599,144 @@ function resetData() {
   localStorage.clear();
   renderSettings(document.getElementById('view-settings'));
   speak('已清空');
+}
+
+// ===== 云端同步 UI 函数 =====
+function updateCloudSyncUI() {
+  const el = document.getElementById('cloudStatus');
+  if (!el) return;
+  const lastSync = Store.get('cloudLastSync', 0);
+  if (CloudSync.isConnected()) {
+    el.innerHTML = `✅ 已连接 · 上次同步：${lastSync ? new Date(lastSync).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '初始同步中...'}`;
+  } else {
+    el.innerHTML = '⚠️ 未连接 · 请设置GitHub Token开启云端同步';
+  }
+}
+
+function showCloudTokenModal() {
+  const currentToken = CloudSync.getToken();
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">🔑 设置云端同步</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:13px;color:var(--text-light);margin-bottom:12px;line-height:1.6;">
+      设置GitHub Personal Access Token 开启云端同步。<br>
+      数据将以 <b style="color:var(--pink);">AES加密</b> 存储至专属独立云空间，仅本账号可访问。<br><br>
+      📌 获取方式：<br>
+      1. 访问 <a href="https://github.com/settings/tokens" target="_blank" style="color:var(--pink);">github.com/settings/tokens</a><br>
+      2. 生成 classic token，勾选 <b>repo</b> 权限<br>
+      3. 复制 token 粘贴到下方<br>
+      <span style="color:var(--red);">⚠️ Token仅保存在浏览器本地，不会泄露</span>
+    </div>
+    <input class="input-field" id="cloudTokenInput" type="password" placeholder="${currentToken ? '已设置Token（不显示）' : '粘贴GitHub Token'}" value="">
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-primary" style="flex:1;" onclick="saveCloudToken()">💾 保存并验证</button>
+      ${currentToken ? '<button class="btn btn-outline" style="flex:1;color:var(--red);" onclick="disconnectCloud()">🔌 断开连接</button>' : ''}
+    </div>
+    <div id="cloudTokenStatus" style="margin-top:10px;font-size:13px;text-align:center;"></div>
+  `;
+  showModal(html);
+}
+
+async function saveCloudToken() {
+  const input = document.getElementById('cloudTokenInput');
+  const token = input.value.trim();
+  const statusEl = document.getElementById('cloudTokenStatus');
+  if (!token) {
+    if (statusEl) statusEl.innerHTML = '⚠️ 请输入Token';
+    return;
+  }
+  statusEl.innerHTML = '⏳ 验证中...';
+  const valid = await CloudSync.verifyToken(token);
+  if (valid) {
+    CloudSync.setToken(token);
+    statusEl.innerHTML = '✅ 验证成功！';
+    setTimeout(() => {
+      closeModal();
+      renderSettings(document.getElementById('view-settings'));
+      speak('云端同步已开启');
+      // 首次连接，立即推送
+      CloudSync.push().then(() => updateCloudSyncUI());
+    }, 800);
+  } else {
+    statusEl.innerHTML = '❌ Token无效或账号不匹配';
+  }
+}
+
+function disconnectCloud() {
+  if (!confirm('确定断开云端连接吗？本地数据不会丢失。')) return;
+  Store.del('cloudToken');
+  Store.del('cloudLastSync');
+  closeModal();
+  renderSettings(document.getElementById('view-settings'));
+  speak('云端连接已断开');
+}
+
+async function cloudSyncNow() {
+  if (!CloudSync.isConnected()) { showToast('请先设置Token'); showCloudTokenModal(); return; }
+  showToast('⏳ 同步中...');
+  const r = await CloudSync.push();
+  if (r.ok) {
+    showToast('✅ 同步完成');
+    updateCloudSyncUI();
+    speak('同步完成');
+  } else {
+    showToast('❌ 同步失败: ' + (r.reason || '未知错误'));
+  }
+}
+
+async function cloudCreateBackup() {
+  if (!CloudSync.isConnected()) { showToast('请先设置Token'); showCloudTokenModal(); return; }
+  showToast('⏳ 创建备份中...');
+  const r = await CloudSync.createBackup();
+  if (r.ok) {
+    showToast('✅ 备份已创建: ' + r.name);
+    speak('备份创建完成');
+  } else {
+    showToast('❌ 备份失败: ' + (r.reason || '未知错误'));
+  }
+}
+
+async function loadCloudBackups() {
+  if (!CloudSync.isConnected()) { showToast('请先设置Token'); return; }
+  showToast('⏳ 加载备份列表...');
+  const list = await CloudSync.listBackups();
+  const container = document.getElementById('cloudBackupList');
+  if (!container) return;
+
+  if (list.length === 0) {
+    container.innerHTML = `<div class="card"><div style="text-align:center;color:var(--text-light);font-size:13px;">📭 暂无云端备份记录<br><small>每日凌晨2点自动创建备份</small></div></div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="section-title" style="margin-top:4px;">📋 备份记录 (${list.length})</div>
+    <div class="card">
+      <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">选择时间节点恢复数据</div>
+      ${list.slice(0, 15).map(b => `
+        <div class="backup-row" style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+          <span style="font-size:13px;">📦 ${b.label}</span>
+          <span style="font-size:11px;color:var(--text-light);">${(b.size/1024).toFixed(1)}KB</span>
+          <button class="btn btn-sm btn-outline" onclick="cloudRestore('${b.path}')">恢复</button>
+        </div>
+      `).join('')}
+      ${list.length > 15 ? `<div style="text-align:center;color:var(--text-light);font-size:12px;margin-top:6px;">...仅显示最近15条备份</div>` : ''}
+    </div>
+  `;
+}
+
+async function cloudRestore(filepath) {
+  if (!confirm('确定从云端恢复此备份吗？当前本地数据将被覆盖！')) return;
+  showToast('⏳ 恢复中...');
+  const r = await CloudSync.restore(filepath);
+  if (r.ok) {
+    showToast(`✅ 成功恢复 ${r.count} 项数据`);
+    speak('数据已恢复');
+    setTimeout(() => location.reload(), 1500);
+  } else {
+    showToast('❌ 恢复失败: ' + (r.reason || '未知错误'));
+  }
 }
 
 // ===== 语音播报 =====
