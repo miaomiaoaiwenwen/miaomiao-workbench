@@ -15,7 +15,7 @@ let exerciseCategory = '全身';
 // ===== LocalStorage 管理 =====
 let _backupTimer = null;
 let _cloudSyncTimer = null;
-const DATA_KEYS = ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers', 'consumption'];
+const DATA_KEYS = ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers', 'consumption', 'recordings', 'voicePrefs', 'reviewReports', 'notes'];
 
 const Store = {
   get(key, def) {
@@ -418,6 +418,11 @@ function switchView(viewId) {
     case 'calendar': renderCalendar(view); break;
     case 'accounting': renderAccounting(view); break;
     case 'creation': renderCreation(view); break;
+    case 'recording': renderRecording(view); break;
+    case 'aireview': renderAIReview(view); break;
+    case 'voice': renderVoiceSettings(view); break;
+    case 'learning': renderLearning(view); break;
+    case 'dashboard': renderDashboard(view); break;
     case 'settings': renderSettings(view); break;
   }
 }
@@ -2776,20 +2781,35 @@ if (window.speechSynthesis) {
   window.speechSynthesis.onvoiceschanged = loadVoices;
 }
 
-function speak(text, rate) {
+function speak(text, rate, volume, pitch) {
   if (!Store.get('voiceOn', true)) return;
   if (!window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
+  try { window.speechSynthesis.cancel(); } catch(e) {}
+  const prefs = Store.get('voicePrefs', { presetId: 'v_female_elegant', rate: 0.85, volume: 1.0 });
+  const preset = typeof VOICE_PRESETS !== 'undefined' ? (VOICE_PRESETS.find(p => p.id === prefs.presetId) || VOICE_PRESETS[6]) : null;
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'zh-CN';
-  u.rate = rate || 0.85; // 舒缓语速
-  u.pitch = 1.1; // 略高音调，更温柔
-  // 尝试选择女声
-  const femaleVoice = voices.find(v =>
-    v.lang.startsWith('zh') && (v.name.includes('Female') || v.name.includes('female') || v.name.includes('女') || v.name.includes('Ting') || v.name.includes('Xiaoxiao'))
-  );
-  if (femaleVoice) u.voice = femaleVoice;
-  window.speechSynthesis.speak(u);
+  u.rate = rate || (preset ? preset.rate : 0.85);
+  u.pitch = pitch || (preset ? preset.pitch : 1.1);
+  u.volume = volume || (preset ? preset.volume : 1.0);
+  // 根据预设性别选择音色
+  const availableVoices = speechSynthesis.getVoices();
+  if (availableVoices.length > 0 && preset) {
+    const genderMatch = availableVoices.filter(v => v.lang.startsWith('zh') && (
+      preset.gender === 'female' ? (v.name.includes('Female') || v.name.includes('Tingting') || v.name.includes('Xiaoxiao') || v.name.includes('Yaoyao') || v.name.includes('女')) :
+      (v.name.includes('Male') || v.name.includes('男'))
+    ));
+    if (genderMatch.length > 0) u.voice = genderMatch[0];
+    else {
+      const zhVoice = availableVoices.find(v => v.lang.startsWith('zh'));
+      if (zhVoice) u.voice = zhVoice;
+    }
+  }
+  u.onerror = (e) => { if (e.error !== 'canceled' && e.error !== 'interrupted') console.log('语音错误:', e.error); };
+  speechSynthesis.speak(u);
+  // 语音提示
+  const hint = document.getElementById('voiceHint');
+  if (hint) { hint.style.display = 'block'; setTimeout(() => { hint.style.display = 'none'; }, 1000); }
 }
 
 // ===== Toast =====
@@ -2817,7 +2837,1088 @@ document.addEventListener('click', (e) => {
   if (e.target.id === 'modalOverlay') closeModal();
 });
 
-// ===== 视频播放器 =====
+// ===== IndexedDB 音频存储 =====
+const AudioDB = {
+  _db: null,
+  async _open() {
+    if (this._db) return this._db;
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open('mm_audio', 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore('audio', { keyPath: 'id' }); };
+      req.onsuccess = () => { this._db = req.result; resolve(this._db); };
+      req.onerror = () => reject(req.error);
+    });
+  },
+  async save(id, blob) {
+    const db = await this._open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('audio', 'readwrite');
+      tx.objectStore('audio').put({ id, blob });
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+  },
+  async get(id) {
+    const db = await this._open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('audio', 'readonly');
+      const req = tx.objectStore('audio').get(id);
+      req.onsuccess = () => resolve(req.result ? req.result.blob : null);
+      req.onerror = () => reject(req.error);
+    });
+  },
+  async del(id) {
+    const db = await this._open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('audio', 'readwrite');
+      tx.objectStore('audio').delete(id);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+  }
+};
+
+// ===== 录音状态 =====
+let mediaRecorder = null;
+let audioChunks = [];
+let recordingStartTime = null;
+let recordingTimer = null;
+let isRecording = false;
+
+// ===== 录音模块 =====
+function renderRecording(view) {
+  const recordings = Store.get('recordings', []);
+  let html = `<div class="section-title">🎙️ 面诊录音</div>`;
+
+  // 录音控制区
+  html += `
+    <div class="card" style="text-align:center;padding:20px;">
+      <div style="font-size:48px;margin-bottom:8px;" id="recIcon">🎙️</div>
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px;" id="recStatus">准备录音</div>
+      <div style="font-size:24px;font-weight:800;color:var(--pink);margin-bottom:12px;display:none;" id="recTimer">00:00</div>
+      <div style="display:flex;gap:8px;justify-content:center;">
+        <button class="btn btn-primary" id="recStartBtn" onclick="startRecording()" style="padding:10px 24px;">▶ 开始录音</button>
+        <button class="btn" style="background:#F44336;color:#fff;display:none;" id="recStopBtn" onclick="stopRecording()">⏹ 结束录音</button>
+      </div>
+      <div style="font-size:11px;color:var(--text-light);margin-top:10px;line-height:1.6;">
+        ⚡ 开启录音后可返回首页正常使用<br>
+        🔒 全程无录音标识，保护面诊隐私<br>
+        📝 录音结束后支持一键转文字
+      </div>
+    </div>
+  `;
+
+  // 录音列表
+  if (recordings.length > 0) {
+    html += `<div class="section-title">历史录音 (${recordings.length})</div>`;
+    [...recordings].reverse().forEach(r => {
+      const dur = r.duration ? Math.floor(r.duration/60)+'分'+Math.floor(r.duration%60)+'秒' : '未知';
+      const hasTranscript = r.transcript && r.transcript.length > 0;
+      const linkedCustomer = r.customerName || '';
+      html += `
+        <div class="recording-item" id="rec-${r.id}">
+          <div class="recording-item-header">
+            <span style="font-size:16px;">🎵</span>
+            <div style="flex:1;">
+              <div style="font-weight:700;font-size:14px;">${linkedCustomer ? '👤 '+linkedCustomer : '未关联顾客'}</div>
+              <div style="font-size:12px;color:var(--text-light);">${r.date} · ${dur}</div>
+            </div>
+            ${hasTranscript ? '<span class="tag tag-green">已转写</span>' : '<span class="tag tag-orange">待转写</span>'}
+          </div>
+          <div class="recording-item-actions">
+            <button class="btn btn-sm btn-outline" onclick="playRecording('${r.id}')">▶ 播放</button>
+            ${!hasTranscript ? `<button class="btn btn-sm btn-primary" onclick="transcribeRecording('${r.id}')">📝 转文字</button>` : `<button class="btn btn-sm btn-outline" onclick="viewTranscript('${r.id}')">📄 查看文稿</button>`}
+            ${!linkedCustomer ? `<button class="btn btn-sm btn-outline" onclick="linkToCustomer('${r.id}')">👤 关联顾客</button>` : ''}
+            <button class="btn btn-sm btn-outline" style="color:var(--red);border-color:var(--red);" onclick="deleteRecording('${r.id}')">🗑</button>
+          </div>
+        </div>
+      `;
+    });
+  } else {
+    html += `<div class="empty-state"><div class="es-icon">🎙️</div><div class="es-text">暂无录音记录</div></div>`;
+  }
+
+  view.innerHTML = html;
+  // 如果正在录音，更新UI
+  if (isRecording) updateRecordingUI();
+}
+
+function startRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('当前浏览器不支持录音功能，请使用Chrome或Safari');
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    isRecording = true;
+    audioChunks = [];
+    recordingStartTime = Date.now();
+    mediaRecorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      saveRecordingBlob();
+    };
+    mediaRecorder.start(1000); // 每秒收集一次数据
+    updateRecordingUI();
+    showToast('🔒 录音已开始（静默模式）');
+    speak('开始录音');
+  }).catch(() => {
+    showToast('无法获取麦克风权限，请检查浏览器设置');
+  });
+}
+
+function updateRecordingUI() {
+  const startBtn = document.getElementById('recStartBtn');
+  const stopBtn = document.getElementById('recStopBtn');
+  const statusEl = document.getElementById('recStatus');
+  const iconEl = document.getElementById('recIcon');
+  const timerEl = document.getElementById('recTimer');
+  if (startBtn) startBtn.style.display = 'none';
+  if (stopBtn) stopBtn.style.display = 'inline-block';
+  if (statusEl) statusEl.textContent = '● 录音中...';
+  if (iconEl) iconEl.textContent = '🔴';
+  if (timerEl) {
+    timerEl.style.display = 'block';
+    if (recordingTimer) clearInterval(recordingTimer);
+    recordingTimer = setInterval(() => {
+      if (!isRecording) { clearInterval(recordingTimer); return; }
+      const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+      const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+      const s = String(elapsed % 60).padStart(2, '0');
+      if (timerEl) timerEl.textContent = m + ':' + s;
+    }, 1000);
+  }
+}
+
+function stopRecording() {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  isRecording = false;
+  if (recordingTimer) clearInterval(recordingTimer);
+  mediaRecorder.stop();
+  showToast('录音已保存，可转写为文字');
+  speak('录音结束');
+}
+
+async function saveRecordingBlob() {
+  const blob = new Blob(audioChunks, { type: 'audio/webm' });
+  const id = 'rec_' + Date.now();
+  const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
+  const rec = {
+    id, date: formatDateTime(new Date()), duration,
+    hasAudio: true, transcript: '', segments: [],
+    customerName: '', customerPhone: ''
+  };
+  await AudioDB.save(id, blob);
+  const recordings = Store.get('recordings', []);
+  recordings.push(rec);
+  Store.set('recordings', recordings);
+  // 重新渲染
+  const view = document.getElementById('view-recording');
+  if (view) renderRecording(view);
+}
+
+async function playRecording(id) {
+  const blob = await AudioDB.get(id);
+  if (!blob) { showToast('音频文件丢失'); return; }
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.onended = () => URL.revokeObjectURL(url);
+  audio.play();
+  showToast('▶ 正在播放...');
+}
+
+// ===== 转写 =====
+function transcribeRecording(id) {
+  const recordings = Store.get('recordings', []);
+  const idx = recordings.findIndex(r => r.id === id);
+  if (idx < 0) return;
+  const rec = recordings[idx];
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">📝 转写录音文稿</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:13px;color:var(--text-light);margin-bottom:12px;">
+      ${rec.date} · ${rec.duration ? Math.floor(rec.duration/60)+'分'+rec.duration%60+'秒' : ''}
+    </div>
+    <div style="margin-bottom:8px;">
+      <div class="section-title" style="margin:0 0 6px;">请输入顾客信息</div>
+      <input class="input-field" id="transName" placeholder="顾客姓名" value="${rec.customerName||''}">
+      <input class="input-field" id="transPhone" placeholder="手机号码" value="${rec.customerPhone||''}">
+    </div>
+    <div style="margin-bottom:8px;">
+      <div class="section-title" style="margin:0 0 6px;">文稿内容（可逐段标注发言人）</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <button class="btn btn-sm btn-outline" onclick="addSegment('咨询师')" style="font-size:11px;">👩‍⚕️ 插入咨询师</button>
+        <button class="btn btn-sm btn-outline" onclick="addSegment('顾客')" style="font-size:11px;">👤 插入顾客</button>
+      </div>
+      <textarea class="input-field" id="transText" style="min-height:200px;font-size:13px;" placeholder="输入文字稿...
+
+提示：点击上方按钮标记发言人，格式为：
+【咨询师】：您好，请问哪里不满意？
+【顾客】：法令纹有点深..."></textarea>
+    </div>
+    <div style="margin-bottom:12px;">
+      <div style="font-size:12px;color:var(--text-light);cursor:pointer;" onclick="tryVoiceInput('${id}')">🎤 使用语音输入（浏览器语音识别）</div>
+      <div id="voiceInputStatus" style="font-size:11px;color:var(--pink);margin-top:4px;display:none;">正在聆听...</div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveTranscript('${id}')">💾 保存文稿并归档</button>
+  `;
+  showModal(html);
+}
+
+// 语音输入（Web Speech API）
+let speechRecognition = null;
+function tryVoiceInput(id) {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) { showToast('浏览器不支持语音识别'); return; }
+  if (!speechRecognition) {
+    speechRecognition = new SpeechRecognition();
+    speechRecognition.lang = 'zh-CN';
+    speechRecognition.continuous = true;
+    speechRecognition.interimResults = true;
+    speechRecognition.onresult = (event) => {
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          const ta = document.getElementById('transText');
+          if (ta) ta.value += event.results[i][0].transcript;
+        } else { interim += event.results[i][0].transcript; }
+      }
+      const statusEl = document.getElementById('voiceInputStatus');
+      if (statusEl) { statusEl.style.display = 'block'; statusEl.textContent = '聆听中: ' + interim; }
+    };
+    speechRecognition.onend = () => {
+      const statusEl = document.getElementById('voiceInputStatus');
+      if (statusEl) statusEl.style.display = 'none';
+    };
+  }
+  speechRecognition.start();
+  showToast('🎤 开始语音输入，请说话');
+}
+
+function addSegment(role) {
+  const ta = document.getElementById('transText');
+  if (ta) {
+    ta.value += (ta.value ? '\n' : '') + '【' + role + '】：';
+    ta.focus();
+  }
+}
+
+function saveTranscript(id) {
+  const name = document.getElementById('transName').value.trim();
+  const phone = document.getElementById('transPhone').value.trim();
+  const text = document.getElementById('transText').value.trim();
+  if (!text) { showToast('请输入文稿内容'); return; }
+  // 解析分段
+  const segPattern = /【(咨询师|顾客)】：/g;
+  const segments = [];
+  let lastIdx = 0, match;
+  while ((match = segPattern.exec(text)) !== null) {
+    if (lastIdx > 0 && segments.length > 0) {
+      segments[segments.length-1].text = text.slice(lastIdx, match.index).trim();
+    }
+    segments.push({ role: match[1], text: '' });
+    lastIdx = match.index + match[0].length;
+  }
+  if (segments.length > 0) {
+    segments[segments.length-1].text = text.slice(lastIdx).trim();
+  }
+  const recordings = Store.get('recordings', []);
+  const idx = recordings.findIndex(r => r.id === id);
+  if (idx >= 0) {
+    recordings[idx].transcript = text;
+    recordings[idx].segments = segments;
+    recordings[idx].customerName = name;
+    recordings[idx].customerPhone = phone;
+    Store.set('recordings', recordings);
+    // 自动归集到顾客档案
+    if (name) autoLinkToCustomerProfile(id, name, phone, text, 'recording');
+    closeModal();
+    const view = document.getElementById('view-recording');
+    if (view) renderRecording(view);
+    showToast('✅ 文稿已保存并归档');
+    speak('文稿保存成功');
+  }
+}
+
+// 自动归集到顾客档案
+function autoLinkToCustomerProfile(recId, name, phone, transcript, type) {
+  let customers = Store.get('customers', []);
+  const key = name + '_' + (phone || 'nophone');
+  let cust = customers.find(c => (c.name + '_' + (c.phone || 'nophone')) === key);
+  if (!cust) {
+    cust = {
+      id: 'cust_' + Date.now(),
+      name: name,
+      phone: phone || '',
+      projects: [],
+      followups: [],
+      recordings: [],
+      reviews: [],
+      status: 'active',
+      createdAt: formatDateTime(new Date())
+    };
+    customers.push(cust);
+  }
+  if (!cust.recordings) cust.recordings = [];
+  cust.recordings.push({
+    recId, date: formatDateTime(new Date()),
+    transcript: transcript.slice(0, 200),
+    type: type
+  });
+  Store.set('customers', customers);
+}
+
+function viewTranscript(id) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === id);
+  if (!rec || !rec.transcript) { showToast('暂无文稿'); return; }
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">📄 录音文稿</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:12px;">
+      ${rec.customerName ? '👤 '+rec.customerName+' · ' : ''}${rec.date}
+    </div>
+    <div style="background:var(--pink-soft);border-radius:12px;padding:14px;max-height:60vh;overflow-y:auto;line-height:1.8;font-size:13px;">
+  `;
+  if (rec.segments && rec.segments.length > 0) {
+    rec.segments.forEach(seg => {
+      html += `<div style="margin-bottom:10px;">
+        <span style="font-weight:700;color:${seg.role==='咨询师'?'var(--pink)':'var(--lavender)'};">【${seg.role}】：</span>
+        <span style="color:var(--text);">${seg.text}</span>
+      </div>`;
+    });
+  } else {
+    html += `<div style="white-space:pre-wrap;color:var(--text);">${rec.transcript}</div>`;
+  }
+  html += `</div>
+    <div style="margin-top:12px;display:flex;gap:8px;">
+      <button class="btn btn-outline btn-full btn-sm" onclick="copyText('${rec.transcript.replace(/'/g,"\\'").replace(/\n/g,'\\n')}')">📋 复制文稿</button>
+      <button class="btn btn-primary btn-full btn-sm" onclick="closeModal();switchView('aireview');runAIReview('${id}')">🤖 AI复盘</button>
+    </div>
+  `;
+  showModal(html);
+}
+
+function linkToCustomer(id) {
+  const customers = Store.get('customers', []);
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">👤 选择关联顾客</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+  `;
+  if (customers.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">👥</div><div class="es-text">暂无顾客档案，请先在顾客跟进中添加</div></div>`;
+  } else {
+    customers.filter(c => c.status !== 'done').forEach(c => {
+      html += `<div style="padding:12px;border-bottom:1px solid #F5F5F5;cursor:pointer;" onclick="doLinkRecording('${id}','${c.name}','${c.phone||''}')">
+        <div style="font-weight:700;">${c.name}</div>
+        <div style="font-size:12px;color:var(--text-light);">${c.phone||'未留电话'} · ${(c.projects||[]).map(p=>p.name).join('、')||'暂无项目'}</div>
+      </div>`;
+    });
+  }
+  html += `<div style="margin-top:8px;"><button class="btn btn-outline btn-full btn-sm" onclick="closeModal()">取消</button></div>`;
+  showModal(html);
+}
+
+function doLinkRecording(recId, name, phone) {
+  const recordings = Store.get('recordings', []);
+  const idx = recordings.findIndex(r => r.id === recId);
+  if (idx >= 0) { recordings[idx].customerName = name; recordings[idx].customerPhone = phone; }
+  Store.set('recordings', recordings);
+  closeModal();
+  const view = document.getElementById('view-recording');
+  if (view) renderRecording(view);
+  showToast('✅ 已关联顾客: ' + name);
+}
+
+function deleteRecording(id) {
+  if (!confirm('确定删除这条录音吗？')) return;
+  AudioDB.del(id).catch(() => {});
+  let recordings = Store.get('recordings', []);
+  recordings = recordings.filter(r => r.id !== id);
+  Store.set('recordings', recordings);
+  const view = document.getElementById('view-recording');
+  if (view) renderRecording(view);
+  showToast('已删除');
+}
+
+// ===== AI智能谈单复盘 =====
+function renderAIReview(view) {
+  const recordings = Store.get('recordings', []);
+  const reviews = Store.get('reviewReports', []);
+  const hasTranscripts = recordings.filter(r => r.transcript && r.transcript.length > 0);
+
+  let html = `<div class="section-title">🤖 AI谈单复盘</div>`;
+  html += `
+    <div class="card" style="text-align:center;padding:16px;">
+      <div style="font-size:36px;margin-bottom:6px;">🤖</div>
+      <div style="font-size:14px;font-weight:700;">AI智能谈单分析</div>
+      <div style="font-size:12px;color:var(--text-light);margin-top:4px;line-height:1.6;">
+        自动分析谈单文稿<br>标注沟通短板 · 优化话术建议 · 生成复盘小结
+      </div>
+    </div>
+  `;
+
+  // 可选择录音进行分析
+  if (hasTranscripts.length > 0) {
+    html += `<div class="section-title">选择文稿进行分析 (${hasTranscripts.length}份可用)</div>`;
+    [...hasTranscripts].reverse().forEach(r => {
+      const hasReview = reviews.some(rv => rv.recordingId === r.id);
+      html += `
+        <div class="card" style="padding:12px 14px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <div>
+              <div style="font-weight:700;font-size:14px;">${r.customerName || '未关联顾客'}</div>
+              <div style="font-size:12px;color:var(--text-light);">${r.date} · ${r.transcript ? r.transcript.length+'字' : ''}</div>
+            </div>
+            <button class="btn btn-sm ${hasReview ? 'btn-outline' : 'btn-primary'}" onclick="runAIReview('${r.id}')">${hasReview ? '📋 查看报告' : '🤖 开始分析'}</button>
+          </div>
+        </div>
+      `;
+    });
+  } else {
+    html += `<div class="empty-state"><div class="es-icon">📝</div><div class="es-text">暂无已转写的录音文稿<br>请先在「面诊录音」中转写录音</div></div>`;
+  }
+
+  // 历史复盘
+  if (reviews.length > 0) {
+    html += `<div class="section-title">历史复盘报告 (${reviews.length})</div>`;
+    [...reviews].reverse().forEach(rv => {
+      html += `
+        <div class="card" style="padding:12px 14px;">
+          <div style="font-weight:700;font-size:14px;">📋 ${rv.customerName || '复盘报告'}</div>
+          <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">${rv.date} · 沟通短板${rv.issues ? rv.issues.length : 0}处</div>
+          <div style="font-size:13px;color:var(--text);line-height:1.6;max-height:80px;overflow:hidden;" id="review-summary-${rv.id}">
+            ${rv.summary || ''}
+          </div>
+          <button class="btn btn-sm btn-outline" style="margin-top:8px;" onclick="showReviewDetail('${rv.id}')">📄 查看完整报告</button>
+        </div>
+      `;
+    });
+  }
+  view.innerHTML = html;
+}
+
+function runAIReview(recordingId) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === recordingId);
+  if (!rec || !rec.transcript) { showToast('请先完成录音转写'); return; }
+
+  const text = rec.transcript;
+  const segments = rec.segments || [];
+
+  // ===== AI分析引擎（基于规则的智能分析）=====
+  const issues = [];
+  const suggestions = [];
+
+  // 1. 检查咨询师发言占比
+  const consultantSegs = segments.filter(s => s.role === '咨询师');
+  const customerSegs = segments.filter(s => s.role === '顾客');
+  const consultantWords = consultantSegs.reduce((sum, s) => sum + s.text.length, 0);
+  const customerWords = customerSegs.reduce((sum, s) => sum + s.text.length, 0);
+  const totalWords = consultantWords + customerWords || 1;
+  const consultantRatio = consultantWords / totalWords;
+
+  if (consultantRatio > 0.75) {
+    issues.push({ type: '话术节奏', desc: '咨询师发言占比过高(' + Math.round(consultantRatio*100) + '%)，缺少顾客互动和倾听', severity: 'medium' });
+    suggestions.push('适当增加开放式提问，引导顾客表达真实需求和顾虑。建议咨询师发言控制在60-70%以内。');
+  } else if (consultantRatio < 0.4) {
+    issues.push({ type: '话术节奏', desc: '咨询师发言占比偏低(' + Math.round(consultantRatio*100) + '%)，可能存在被顾客带节奏的情况', severity: 'medium' });
+    suggestions.push('加强专业输出和项目方案讲解，主动引导谈单方向。');
+  }
+
+  // 2. 检查顾客异议处理
+  const customerText = customerSegs.map(s => s.text).join(' ');
+  const concernKeywords = ['贵', '便宜', '考虑', '再看看', '怕', '担心', '疼', '痛', '效果', '没效果', '恢复', '假', '不自然', '安全', '风险', '犹豫', '算了'];
+  const foundConcerns = concernKeywords.filter(kw => customerText.includes(kw));
+  if (foundConcerns.length > 0) {
+    const handled = foundConcerns.filter(kw => {
+      const idx = customerText.indexOf(kw);
+      // 检查咨询师是否在后面回应了
+      const afterText = consultantSegs.filter(s => {
+        const segIdx = text.indexOf(s.text);
+        return segIdx > idx;
+      }).map(s => s.text).join(' ');
+      return afterText.length > 0;
+    });
+    if (handled.length < foundConcerns.length) {
+      const unhandled = foundConcerns.filter(k => !handled.includes(k));
+      issues.push({ type: '异议处理', desc: '以下顾客顾虑可能未被充分回应：' + unhandled.join('、'), severity: 'high' });
+      suggestions.push('针对顾客的价格顾虑/效果担忧/安全担心，准备标准化应答话术，不回避问题。');
+    }
+  }
+
+  // 3. 检查项目方案是否明确
+  const projectKeywords = ['疗程', '方案', '建议', '推荐', '项目', '次', '间隔', '术后', '护理', '防晒'];
+  const hasProjectMentioned = projectKeywords.some(kw => text.includes(kw));
+  if (!hasProjectMentioned) {
+    issues.push({ type: '方案讲解', desc: '未检测到明确的疗程方案讲解，可能只是做了产品介绍', severity: 'high' });
+    suggestions.push('每个谈单必须明确输出"项目名称+疗程次数+间隔时间+预期效果+价格区间"五要素。');
+  }
+
+  // 4. 检查价格谈判
+  const priceKeywords = ['钱', '价格', '费用', '优惠', '便宜', '贵', '折扣', '活动'];
+  const hasPriceTalk = priceKeywords.some(kw => text.includes(kw));
+  if (hasPriceTalk) {
+    const bargainingPattern = /(能不能|可以.*便宜|少.*钱|打折|优惠).*/g;
+    const hasBargaining = bargainingPattern.test(customerText);
+    if (hasBargaining) {
+      const priceResponse = consultantSegs.filter(s => s.text.includes('价格') || s.text.includes('优惠') || s.text.includes('价值')).map(s => s.text).join('');
+      if (priceResponse.length < 30) {
+        issues.push({ type: '议价应对', desc: '顾客有议价行为，但咨询师的回应较为简短，可能未充分进行价值锚定', severity: 'medium' });
+        suggestions.push('议价时采用"价值锚定法"：先讲项目价值→再讲专业保障→最后给出福利补偿，而不是直接降价。');
+      }
+    }
+  }
+
+  // 5. 检查专业度
+  const professionalTerms = ['屏障', '胶原', '黑素', '血管', '真皮', '表皮', 'SMAS', '代谢', '光热', '靶组织', '交联', '溶解酶'];
+  const usedTerms = professionalTerms.filter(t => text.includes(t));
+  if (usedTerms.length < 2 && consultantWords > 100) {
+    issues.push({ type: '专业度', desc: '专业术语使用较少，可能显得不够专业可信', severity: 'medium' });
+    suggestions.push('适当在讲解中融入专业术语（如"皮肤屏障""胶原重塑""光热作用"等），增强专业权威感。');
+  }
+
+  // 6. 检查成交信号
+  const closingKeywords = ['怎么付', '什么时候做', '约', '现在能', '今天', '定了', '行', '可以'];
+  const hasClosingSignal = closingKeywords.some(kw => customerText.includes(kw));
+  const askedForClose = text.includes('做') && (text.includes('今天') || text.includes('现在') || text.includes('约'));
+  if (hasClosingSignal && !askedForClose) {
+    issues.push({ type: '成交时机', desc: '检测到顾客有购买意向信号，但未发现明确的促进行动', severity: 'high' });
+    suggestions.push('识别成交信号（如"那我试一下""什么时候可以做"）后应立即推动成交，提供明确的行动指引。');
+  }
+
+  // 7. 整体分析
+  const segCount = segments.length;
+  const consultantTurns = consultantSegs.length;
+  const avgResponseLen = consultantSegs.length > 0 ? consultantWords / consultantSegs.length : 0;
+
+  // 生成复盘小结
+  const goodPoints = [];
+  const badPoints = [];
+  if (avgResponseLen > 80) goodPoints.push('咨询师发言内容充实详细');
+  if (segCount > 10) goodPoints.push('沟通回合充足，有深入交流');
+  if (segCount < 5) badPoints.push('沟通回合偏少，可能流于表面');
+  if (usedTerms.length >= 3) goodPoints.push('专业术语运用得当');
+  if (issues.length === 0) goodPoints.push('整体沟通无明显短板');
+
+  issues.forEach(i => badPoints.push(i.desc));
+
+  const summary = `
+【优点】${goodPoints.length > 0 ? goodPoints.join('；') : '暂未发现明显优势点'}
+【待改进】${badPoints.length > 0 ? badPoints.join('；') : '暂未发现明显问题点'}
+【总字数】共${totalWords}字（咨询师${consultantWords}字/顾客${customerWords}字，占比${Math.round(consultantRatio*100)}%/${Math.round((1-consultantRatio)*100)}%）
+【沟通回合】共${segCount}个回合
+【建议】${suggestions.length > 0 ? suggestions.join(' ') : '保持现有沟通节奏，持续优化'}`.trim();
+
+  // 保存复盘报告
+  const review = {
+    id: 'review_' + Date.now(),
+    recordingId, customerName: rec.customerName || '未知顾客',
+    date: formatDateTime(new Date()),
+    issues, suggestions, summary,
+    consultantRatio: Math.round(consultantRatio * 100),
+    totalWords, segCount
+  };
+  const reviews = Store.get('reviewReports', []);
+  // 替换旧报告
+  const oldIdx = reviews.findIndex(r => r.recordingId === recordingId);
+  if (oldIdx >= 0) reviews[oldIdx] = review; else reviews.push(review);
+  Store.set('reviewReports', reviews);
+
+  // 同步到顾客档案
+  if (rec.customerName) {
+    let customers = Store.get('customers', []);
+    const key = rec.customerName + '_' + (rec.customerPhone || 'nophone');
+    let cust = customers.find(c => (c.name + '_' + (c.phone || 'nophone')) === key);
+    if (cust) {
+      if (!cust.reviews) cust.reviews = [];
+      cust.reviews.push({ reviewId: review.id, date: review.date, summary: review.summary.slice(0, 150) });
+      Store.set('customers', customers);
+    }
+  }
+
+  // 显示报告
+  showReviewDetail(review.id);
+}
+
+function showReviewDetail(reviewId) {
+  const reviews = Store.get('reviewReports', []);
+  const review = reviews.find(r => r.id === reviewId);
+  if (!review) return;
+
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">🤖 AI复盘报告</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:12px;">
+      👤 ${review.customerName} · ${review.date} · 共${review.totalWords}字 · ${review.segCount}回合
+    </div>
+  `;
+
+  if (review.issues && review.issues.length > 0) {
+    html += `<div class="section-title" style="color:var(--red);">⚠️ 检测到 ${review.issues.length} 个问题</div>`;
+    review.issues.forEach((issue, i) => {
+      const sevColors = { high: '#F44336', medium: '#FF9800', low: '#4CAF50' };
+      const sevLabels = { high: '严重', medium: '一般', low: '轻微' };
+      html += `
+        <div class="card" style="padding:10px 14px;margin-bottom:8px;border-left:3px solid ${sevColors[issue.severity]};">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span style="font-size:11px;font-weight:700;color:${sevColors[issue.severity]};background:${sevColors[issue.severity]}15;padding:1px 6px;border-radius:6px;">${sevLabels[issue.severity]}</span>
+            <span style="font-size:12px;font-weight:600;">${issue.type}</span>
+          </div>
+          <div style="font-size:13px;margin-top:4px;color:var(--text);">${issue.desc}</div>
+        </div>
+      `;
+    });
+  }
+
+  if (review.suggestions && review.suggestions.length > 0) {
+    html += `<div class="section-title" style="color:var(--pink);">💡 优化建议</div>`;
+    review.suggestions.forEach(s => {
+      html += `<div class="card" style="padding:10px 14px;margin-bottom:6px;font-size:13px;background:var(--pink-soft);">💬 ${s}</div>`;
+    });
+  }
+
+  html += `
+    <div class="section-title">📋 复盘小结</div>
+    <div class="card" style="padding:12px 14px;font-size:13px;line-height:1.7;white-space:pre-wrap;">${review.summary}</div>
+    <button class="btn btn-primary btn-full" style="margin-top:10px;" onclick="closeModal()">✅ 我知道了</button>
+  `;
+  showModal(html);
+}
+
+// ===== 音色播报设置 =====
+function renderVoiceSettings(view) {
+  const prefs = Store.get('voicePrefs', { presetId: 'v_female_elegant', rate: 0.85, volume: 1.0 });
+  const currentPreset = VOICE_PRESETS.find(p => p.id === prefs.presetId) || VOICE_PRESETS[6];
+
+  let html = `<div class="section-title">🔊 音色选择</div>`;
+
+  // 当前音色卡片
+  html += `
+    <div class="card" style="background:linear-gradient(135deg,var(--pink-soft),var(--lavender-light));text-align:center;padding:18px;">
+      <div style="font-size:36px;">${currentPreset.icon}</div>
+      <div style="font-size:16px;font-weight:700;margin-top:6px;">${currentPreset.name}</div>
+      <div style="font-size:12px;color:var(--text-light);">${currentPreset.desc}</div>
+      <div style="display:flex;gap:8px;justify-content:center;margin-top:10px;">
+        <button class="btn btn-sm btn-primary" onclick="previewVoice('${currentPreset.id}')">🔊 试听</button>
+        <button class="btn btn-sm btn-outline" onclick="speak('妙妙工作台，您的美学顾问伙伴', prefs.rate, prefs.volume, currentPreset.pitch)">📢 播报测试</button>
+      </div>
+    </div>
+  `;
+
+  // 语速/音量调节
+  html += `
+    <div class="section-title">自定义参数</div>
+    <div class="card">
+      <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <div style="display:flex;justify-content:space-between;">
+          <span class="sr-label">播报语速</span>
+          <span class="sr-value" id="rateVal">${prefs.rate || 0.85}x</span>
+        </div>
+        <input type="range" min="0.5" max="1.5" step="0.05" value="${prefs.rate || 0.85}" oninput="updateVoiceRate(this.value)" style="width:100%;">
+      </div>
+      <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;margin-top:10px;">
+        <div style="display:flex;justify-content:space-between;">
+          <span class="sr-label">播报音量</span>
+          <span class="sr-value" id="volVal">${Math.round((prefs.volume || 1) * 100)}%</span>
+        </div>
+        <input type="range" min="0.2" max="1.5" step="0.05" value="${prefs.volume || 1}" oninput="updateVoiceVolume(this.value)" style="width:100%;">
+      </div>
+    </div>
+  `;
+
+  // 男声音色
+  html += `<div class="section-title">🧔 男声音色</div>`;
+  const malePresets = VOICE_PRESETS.filter(p => p.gender === 'male');
+  malePresets.forEach(p => {
+    html += `
+      <div class="card voice-card ${prefs.presetId === p.id ? 'voice-active' : ''}" style="padding:12px 14px;display:flex;align-items:center;gap:10px;" onclick="selectVoicePreset('${p.id}')">
+        <span style="font-size:24px;">${p.icon}</span>
+        <div style="flex:1;">
+          <div style="font-weight:700;font-size:14px;">${p.name}</div>
+          <div style="font-size:12px;color:var(--text-light);">${p.desc}</div>
+        </div>
+        <button class="btn btn-sm btn-outline" onclick="event.stopPropagation();previewVoice('${p.id}')">试听</button>
+      </div>
+    `;
+  });
+
+  // 女声音色
+  html += `<div class="section-title">👩 女声音色</div>`;
+  const femalePresets = VOICE_PRESETS.filter(p => p.gender === 'female');
+  femalePresets.forEach(p => {
+    html += `
+      <div class="card voice-card ${prefs.presetId === p.id ? 'voice-active' : ''}" style="padding:12px 14px;display:flex;align-items:center;gap:10px;" onclick="selectVoicePreset('${p.id}')">
+        <span style="font-size:24px;">${p.icon}</span>
+        <div style="flex:1;">
+          <div style="font-weight:700;font-size:14px;">${p.name}</div>
+          <div style="font-size:12px;color:var(--text-light);">${p.desc}</div>
+        </div>
+        <button class="btn btn-sm btn-outline" onclick="event.stopPropagation();previewVoice('${p.id}')">试听</button>
+      </div>
+    `;
+  });
+
+  view.innerHTML = html;
+}
+
+function selectVoicePreset(presetId) {
+  const prefs = Store.get('voicePrefs', { presetId: 'v_female_elegant', rate: 0.85, volume: 1.0 });
+  prefs.presetId = presetId;
+  Store.set('voicePrefs', prefs);
+  const view = document.getElementById('view-voice');
+  if (view) renderVoiceSettings(view);
+  const preset = VOICE_PRESETS.find(p => p.id === presetId);
+  if (preset) {
+    speak('已切换到 ' + preset.name, prefs.rate || 0.85, prefs.volume || 1.0, preset.pitch);
+  }
+}
+
+function previewVoice(presetId) {
+  const preset = VOICE_PRESETS.find(p => p.id === presetId);
+  if (preset) {
+    speak('您好，我是妙妙工作台的语音助手。这是' + preset.name + '的音色效果。', preset.rate, preset.volume, preset.pitch);
+    showToast('🔊 正在试听: ' + preset.name);
+  }
+}
+
+function updateVoiceRate(val) {
+  const prefs = Store.get('voicePrefs', { presetId: 'v_female_elegant', rate: 0.85, volume: 1.0 });
+  prefs.rate = parseFloat(val);
+  Store.set('voicePrefs', prefs);
+  const el = document.getElementById('rateVal');
+  if (el) el.textContent = val + 'x';
+}
+
+function updateVoiceVolume(val) {
+  const prefs = Store.get('voicePrefs', { presetId: 'v_female_elegant', rate: 0.85, volume: 1.0 });
+  prefs.volume = parseFloat(val);
+  Store.set('voicePrefs', prefs);
+  const el = document.getElementById('volVal');
+  if (el) el.textContent = Math.round(val * 100) + '%';
+}
+
+// ===== 专业学习资料库 =====
+let learningTab = 'scripts'; // scripts | projects | cases
+
+function renderLearning(view) {
+  let html = `<div class="section-title">📚 专业学习资料库</div>`;
+
+  // 子Tab切换
+  html += `
+    <div class="acct-tabs" style="margin-bottom:12px;">
+      <div class="acct-tab ${learningTab==='scripts'?'active':''}" onclick="switchLearningTab('scripts')">💬 场景话术</div>
+      <div class="acct-tab ${learningTab==='projects'?'active':''}" onclick="switchLearningTab('projects')">📋 项目知识</div>
+      <div class="acct-tab ${learningTab==='cases'?'active':''}" onclick="switchLearningTab('cases')">🏆 成交案例</div>
+    </div>
+  `;
+
+  if (learningTab === 'scripts') {
+    html += `<div class="section-title">高频场景话术 · ${SCRIPT_LIBRARY.length}个场景</div>`;
+    SCRIPT_LIBRARY.forEach(s => {
+      html += `
+        <div class="card learning-card" onclick="showScriptDetail('${s.id}')">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="tag tag-pink">${s.scene}</span>
+            <span style="font-weight:700;font-size:14px;flex:1;">${s.title}</span>
+          </div>
+          <div style="font-size:12px;color:var(--text-light);margin-top:6px;">${s.summary.slice(0,80)}...</div>
+          <div style="margin-top:8px;font-size:11px;color:var(--lavender);">
+            🔑 ${s.keyPoints.slice(0,3).join(' · ')}
+          </div>
+        </div>
+      `;
+    });
+  } else if (learningTab === 'projects') {
+    html += `<div class="section-title">店内项目知识 · ${PROJECT_KNOWLEDGE.length}个项目</div>`;
+    PROJECT_KNOWLEDGE.forEach(p => {
+      html += `
+        <div class="card learning-card" onclick="showProjectDetail('${p.id}')">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="tag tag-${p.category==='光电'?'blue':p.category==='填充'?'purple':p.category==='水光'?'green':p.category==='紧致'?'orange':'pink'}">${p.category}</span>
+            <span style="font-weight:700;font-size:14px;">${p.name}</span>
+          </div>
+          <div style="font-size:12px;color:var(--text-light);margin-top:4px;">品牌: ${p.brand} · 适用: ${p.suitable.slice(0,30)}...</div>
+        </div>
+      `;
+    });
+  } else if (learningTab === 'cases') {
+    html += `<div class="section-title">成交案例拆解 · ${CASE_LIBRARY.length}个案例</div>`;
+    CASE_LIBRARY.forEach(c => {
+      html += `
+        <div class="card learning-card" onclick="showCaseDetail('${c.id}')">
+          <div style="font-weight:700;font-size:14px;">${c.title}</div>
+          <div style="font-size:12px;color:var(--text-light);margin-top:4px;">${c.background.slice(0,60)}...</div>
+          <div style="margin-top:6px;font-size:11px;color:var(--pink);font-weight:600;">
+            💰 ${c.result.slice(0,50)}...
+          </div>
+        </div>
+      `;
+    });
+  }
+
+  view.innerHTML = html;
+}
+
+function switchLearningTab(tab) {
+  learningTab = tab;
+  const view = document.getElementById('view-learning');
+  if (view) renderLearning(view);
+}
+
+function showScriptDetail(id) {
+  const s = SCRIPT_LIBRARY.find(x => x.id === id);
+  if (!s) return;
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">💬 ${s.title}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="card" style="padding:10px 14px;font-size:13px;line-height:1.6;background:var(--pink-soft);margin-bottom:10px;">${s.summary}</div>
+    <div class="section-title">📞 完整对话</div>
+  `;
+  s.steps.forEach(step => {
+    const isConsultant = step.role === '咨询师';
+    html += `
+      <div class="card" style="padding:10px 14px;margin-bottom:6px;${isConsultant ? 'border-left:3px solid var(--pink);' : 'border-left:3px solid var(--lavender);'}">
+        <div style="font-weight:700;font-size:12px;color:${isConsultant ? 'var(--pink)' : 'var(--lavender)'};">${step.role}</div>
+        <div style="font-size:13px;line-height:1.7;margin-top:4px;">${step.text}</div>
+      </div>
+    `;
+  });
+  html += `
+    <div class="section-title">🔑 成交关键点</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;line-height:1.8;">
+      ${s.keyPoints.map((kp,i) => `<div>${i+1}. ${kp}</div>`).join('')}
+    </div>
+    <button class="btn btn-primary btn-full" style="margin-top:10px;" onclick="speak('${s.steps.map(st=>st.text).join('。').replace(/'/g,'').replace(/\n/g,'')}')">🔊 全文朗读学习</button>
+  `;
+  showModal(html);
+}
+
+function showProjectDetail(id) {
+  const p = PROJECT_KNOWLEDGE.find(x => x.id === id);
+  if (!p) return;
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">📋 ${p.name}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="card" style="padding:10px 14px;"><span class="tag tag-pink">${p.category}</span> <span style="font-size:12px;color:var(--text-light);">品牌: ${p.brand}</span></div>
+    <div class="section-title">✅ 适用人群</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;">${p.suitable}</div>
+    <div class="section-title">👍 优势</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;background:#E8F5E9;">${p.pros}</div>
+    <div class="section-title">⚠️ 局限</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;background:#FFF8E1;">${p.cons}</div>
+    <div class="section-title">📅 疗程规划</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;">${p.plan}</div>
+    <div class="section-title">🚫 禁忌症</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;background:#FFEBEE;">${p.contraindications}</div>
+    <div class="section-title">💡 咨询技巧</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;background:var(--pink-soft);">${p.tips}</div>
+    <button class="btn btn-outline btn-full btn-sm" style="margin-top:10px;" onclick="copyText('${(p.name+'\\n适合:'+p.suitable+'\\n优势:'+p.pros+'\\n疗程:'+p.plan).replace(/'/g,'\\\'')}')">📋 复制要点</button>
+  `;
+  showModal(html);
+}
+
+function showCaseDetail(id) {
+  const c = CASE_LIBRARY.find(x => x.id === id);
+  if (!c) return;
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">🏆 ${c.title}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="card" style="padding:10px 14px;font-size:13px;line-height:1.6;background:var(--lavender-light);">📌 ${c.background}</div>
+    <div class="section-title">💬 关键对话</div>
+  `;
+  c.dialogue.forEach(d => {
+    html += `
+      <div class="card" style="padding:10px 14px;margin-bottom:6px;border-left:3px solid ${d.role==='咨询师'?'var(--pink)':'var(--lavender)'};">
+        <div style="font-weight:700;font-size:12px;color:${d.role==='咨询师'?'var(--pink)':'var(--lavender)'};">${d.role}</div>
+        <div style="font-size:13px;line-height:1.7;margin-top:4px;">${d.text}</div>
+      </div>
+    `;
+  });
+  html += `
+    <div class="section-title">💰 成交结果</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;background:#E8F5E9;font-weight:600;">${c.result}</div>
+    <div class="section-title">🔑 核心拆解</div>
+    <div class="card" style="padding:10px 14px;font-size:13px;line-height:1.8;">
+      ${c.keyInsights.map((ki,i) => `<div>${i+1}. ${ki}</div>`).join('')}
+    </div>
+  `;
+  showModal(html);
+}
+
+// ===== 个人成长数据台账 =====
+function renderDashboard(view) {
+  const customers = Store.get('customers', []);
+  const recordings = Store.get('recordings', []);
+  const reviews = Store.get('reviewReports', []);
+  const consumption = Store.get('consumption', []);
+  const completions = Store.get('completions', {});
+
+  const now = new Date();
+  const thisMonth = now.getMonth();
+  const thisYear = now.getFullYear();
+
+  // 月度统计
+  const monthRecordings = recordings.filter(r => {
+    const d = new Date(r.date);
+    return d.getMonth() === thisMonth && d.getFullYear() === thisYear;
+  });
+  const monthConsumptions = consumption.filter(c => {
+    const d = new Date(c.date);
+    return d.getMonth() === thisMonth && d.getFullYear() === thisYear;
+  });
+  const monthDeals = monthConsumptions.filter(c => c.status === 'paid' || c.status === 'done');
+  const monthRevenue = monthConsumptions.reduce((sum, c) => sum + (parseFloat(c.amount) || 0), 0);
+
+  // 成交/未成交分析
+  const totalDeals = consumption.filter(c => c.status === 'paid' || c.status === 'done').length;
+  const totalLost = consumption.filter(c => c.status === 'lost').length;
+  const loseReasons = {};
+  consumption.filter(c => c.status === 'lost' && c.loseReason).forEach(c => {
+    loseReasons[c.loseReason] = (loseReasons[c.loseReason] || 0) + 1;
+  });
+
+  // 顾客薄弱场景
+  const reviewIssues = [];
+  reviews.forEach(r => {
+    if (r.issues) r.issues.forEach(i => reviewIssues.push(i.type));
+  });
+  const issueCount = {};
+  reviewIssues.forEach(t => { issueCount[t] = (issueCount[t] || 0) + 1; });
+  const weakAreas = Object.entries(issueCount).sort((a,b) => b[1]-a[1]).slice(0, 5);
+
+  // 全量数据统计
+  const allConsumptions = consumption.filter(c => c.status !== 'archived');
+  const totalRevenue = allConsumptions.reduce((sum, c) => sum + (parseFloat(c.amount) || 0), 0);
+
+  let html = `<div class="section-title">📊 个人成长数据台账</div>`;
+
+  // 核心指标
+  html += `
+    <div class="consumption-stats" style="margin-bottom:12px;">
+      <div class="consumption-stat-card">
+        <div class="consumption-stat-num">${monthRecordings.length}</div>
+        <div class="consumption-stat-label">本月谈单次数</div>
+      </div>
+      <div class="consumption-stat-card">
+        <div class="consumption-stat-num">${monthDeals.length}</div>
+        <div class="consumption-stat-label">本月成交数</div>
+      </div>
+      <div class="consumption-stat-card">
+        <div class="consumption-stat-num">¥${(monthRevenue/10000).toFixed(1)}万</div>
+        <div class="consumption-stat-label">本月业绩</div>
+      </div>
+    </div>
+  `;
+
+  // 总览
+  html += `
+    <div class="card" style="padding:12px 14px;">
+      <div class="section-title" style="margin-top:0;">📈 累计总览</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
+        <div>📝 录音文稿：<b>${recordings.length}</b> 份</div>
+        <div>🤖 AI复盘：<b>${reviews.length}</b> 次</div>
+        <div>👥 顾客档案：<b>${customers.length}</b> 人</div>
+        <div>💳 消费记录：<b>${consumption.length}</b> 条</div>
+        <div>💰 累计业绩：<b>¥${(totalRevenue/10000).toFixed(1)}万</b></div>
+        <div>🏆 成交率：<b>${totalDeals+totalLost>0 ? Math.round(totalDeals/(totalDeals+totalLost)*100) : 0}%</b></div>
+      </div>
+    </div>
+  `;
+
+  // 未成交原因分析
+  if (Object.keys(loseReasons).length > 0) {
+    html += `<div class="section-title">📉 未成交原因分布</div>`;
+    html += `<div class="card" style="padding:12px 14px;">`;
+    Object.entries(loseReasons).sort((a,b)=>b[1]-a[1]).forEach(([reason, count]) => {
+      const pct = Math.round(count / totalLost * 100);
+      html += `
+        <div style="margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;font-size:12px;">
+            <span>${reason}</span><span style="font-weight:700;">${count}次 · ${pct}%</span>
+          </div>
+          <div style="background:#F0F0F0;border-radius:4px;height:6px;overflow:hidden;">
+            <div style="background:linear-gradient(90deg,#FF6B9D,#FF8FB1);height:100%;width:${pct}%;border-radius:4px;"></div>
+          </div>
+        </div>
+      `;
+    });
+    html += `</div>`;
+  }
+
+  // 个人薄弱环节
+  if (weakAreas.length > 0) {
+    html += `<div class="section-title">🎯 个人薄弱沟通场景</div>`;
+    weakAreas.forEach(([area, count]) => {
+      html += `
+        <div class="card" style="padding:10px 14px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="font-weight:700;font-size:13px;">⚠️ ${area}</div>
+            <div style="font-size:11px;color:var(--text-light);">AI复盘累计发现 ${count} 次</div>
+          </div>
+          <button class="btn btn-sm btn-outline" onclick="goToLearning('${area}')">📚 学习</button>
+        </div>
+      `;
+    });
+    html += `<div style="font-size:11px;color:var(--text-light);text-align:center;margin:8px 0;">💡 已在学习资料库对应场景增加专项练习建议</div>`;
+  }
+
+  // 最近活动
+  html += `<div class="section-title">🕐 最近动态</div>`;
+  const recentItems = [];
+  recordings.slice(-3).forEach(r => recentItems.push({ type: 'recording', text: '🎙️ 完成录音', detail: (r.customerName||'未关联') + ' · ' + r.date, time: r.date }));
+  reviews.slice(-3).forEach(r => recentItems.push({ type: 'review', text: '🤖 AI复盘', detail: r.customerName + ' · ' + (r.issues?r.issues.length:0)+'个问题', time: r.date }));
+  consumption.slice(-3).forEach(c => recentItems.push({ type: 'consumption', text: '💳 ' + (c.status==='paid'?'成交':'记录'), detail: c.customerName + ' · ¥' + (c.amount||0), time: c.date }));
+  recentItems.sort((a,b) => b.time.localeCompare(a.time));
+  recentItems.slice(0, 10).forEach(item => {
+    html += `
+      <div style="padding:8px 14px;font-size:12px;border-bottom:1px solid #F5F5F5;display:flex;justify-content:space-between;">
+        <span>${item.text}</span>
+        <span style="color:var(--text-light);">${item.detail}</span>
+      </div>
+    `;
+  });
+
+  if (recentItems.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">📊</div><div class="es-text">开始使用工作台后，数据将在此汇总</div></div>`;
+  }
+
+  view.innerHTML = html;
+}
+
+function goToLearning(area) {
+  switchView('learning');
+  setTimeout(() => {
+    const scripts = document.getElementById('view-learning');
+    if (scripts) {
+      // 根据薄弱场景匹配话术
+      const mappedScenes = {
+        '异议处理': '议价砍价',
+        '话术节奏': '犹豫顾客挽留',
+        '方案讲解': '玻尿酸填充',
+        '议价应对': '议价砍价',
+        '成交时机': '犹豫顾客挽留',
+        '专业度': '初次面诊破冰'
+      };
+      const scene = mappedScenes[area] || area;
+      const match = SCRIPT_LIBRARY.find(s => s.scene === scene);
+      if (match) showScriptDetail(match.id);
+    }
+  }, 300);
+}
+
 function showVideoPlayer(title, videoUrl, contentHtml) {
   const bililiUrl = videoUrl || ('https://search.bilibili.com/all?keyword=' + encodeURIComponent(title));
   const douyinUrl = 'https://www.douyin.com/search/' + encodeURIComponent(title);
