@@ -226,6 +226,30 @@ const CloudSync = {
     }
   },
 
+  // ===== 每日自动备份（启动时检查）=====
+  async dailyAutoBackup() {
+    if (!this.isConnected()) return;
+    const today = [new Date().getFullYear(),
+      String(new Date().getMonth()+1).padStart(2,'0'),
+      String(new Date().getDate()).padStart(2,'0')].join('-');
+    const lastDaily = Store.get('cloudDailyBackup', '');
+    if (lastDaily === today) return; // 今天已备份
+
+    // 检查云端是否已有今天的备份
+    const backups = await this.listBackups();
+    const hasToday = backups.some(b => b.label.startsWith(today));
+    if (hasToday) {
+      Store.set('cloudDailyBackup', today);
+      return;
+    }
+    // 创建每日备份
+    const r = await this.createBackup();
+    if (r.ok) {
+      Store.set('cloudDailyBackup', today);
+      console.log('📦 每日备份已完成:', r.name);
+    }
+  },
+
   // ===== 验证 Token =====
   async verifyToken(token) {
     try {
@@ -265,6 +289,9 @@ async function pullFromCloud() {
 async function initCloudSync() {
   if (!CloudSync.isConnected()) return;
   try {
+    // 每日自动备份（如果今天还没有）
+    CloudSync.dailyAutoBackup();
+
     // 检查本地是否有实质数据
     let hasLocal = false;
     const customers = Store.get('customers', []);
