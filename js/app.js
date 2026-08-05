@@ -2733,7 +2733,7 @@ async function loadCloudBackups() {
   if (!container) return;
 
   if (list.length === 0) {
-    container.innerHTML = `<div class="card"><div style="text-align:center;color:var(--text-light);font-size:13px;">📭 暂无云端备份记录<br><small>每日凌晨2点自动创建备份</small></div></div>`;
+    container.innerHTML = `<div class="card"><div style="text-align:center;color:var(--text-light);font-size:13px;">📭 暂无云端备份记录<br><small>每次打开APP时自动创建每日备份</small></div></div>`;
     return;
   }
 
