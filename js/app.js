@@ -2871,8 +2871,43 @@ function showToast(msg) {
 }
 
 // ===== 模态框 =====
-function showModal(html) {
-  document.getElementById('modal').innerHTML = html;
+function showModal(htmlOrTitle, contentOrButtons, maybeButtons) {
+  // 兼容多种调用方式:
+  // showModal(html) - 旧用法
+  // showModal(title, content, buttons) - 新用法
+  let title, content, buttons;
+  if (contentOrButtons === undefined) {
+    content = htmlOrTitle;
+    title = '';
+    buttons = null;
+  } else {
+    title = htmlOrTitle;
+    content = contentOrButtons;
+    buttons = maybeButtons;
+  }
+  // 保存按钮回调到 window 按索引直接调用
+  window.__modalCallbacks = [];
+  let btnHtml = '';
+  if (buttons && Array.isArray(buttons) && buttons.length > 0) {
+    buttons.forEach((btn, i) => {
+      window.__modalCallbacks[i] = () => {
+        closeModal();
+        if (btn.onClick) btn.onClick();
+      };
+    });
+    btnHtml = `<div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">` +
+      buttons.map((btn, i) => {
+        const bg = btn.primary ? 'var(--pink)' : '#fff';
+        const color = btn.primary ? '#fff' : 'var(--pink)';
+        const border = 'var(--pink)';
+        return `<button class="btn" style="flex:1;background:${bg};color:${color};border:1.5px solid ${border};padding:10px 16px;" onclick="window.__modalCallbacks[${i}]()">${btn.text}</button>`;
+      }).join('') +
+      `</div>`;
+  } else {
+    btnHtml = `<div style="text-align:center;margin-top:16px;"><button class="btn btn-primary" style="padding:10px 32px;" onclick="closeModal()">关闭</button></div>`;
+  }
+  const titleHtml = title ? `<div style="font-size:18px;font-weight:700;margin-bottom:12px;color:#333;text-align:center;">${title}</div>` : '';
+  document.getElementById('modal').innerHTML = titleHtml + `<div>${content}</div>` + btnHtml;
   document.getElementById('modalOverlay').style.display = 'flex';
 }
 function closeModal() {
@@ -2970,14 +3005,18 @@ function renderRecordingContent(container) {
       <div style="font-size:48px;margin-bottom:8px;" id="recIcon">🎙️</div>
       <div style="font-size:15px;font-weight:700;margin-bottom:4px;" id="recStatus">准备录音</div>
       <div style="font-size:24px;font-weight:800;color:var(--pink);margin-bottom:12px;display:none;" id="recTimer">00:00</div>
-      <div style="display:flex;gap:8px;justify-content:center;">
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
         <button class="btn btn-primary" id="recStartBtn" onclick="startRecording()" style="padding:10px 24px;">▶ 开始录音</button>
         <button class="btn" style="background:#F44336;color:#fff;display:none;" id="recStopBtn" onclick="stopRecording()">⏹ 结束录音</button>
+      </div>
+      <div style="margin-top:10px;">
+        <button class="btn btn-outline" onclick="uploadAudioFile()" style="padding:8px 16px;font-size:13px;border-style:dashed;">📁 上传录音文件（iPhone用户推荐）</button>
       </div>
       <div style="font-size:11px;color:var(--text-light);margin-top:10px;line-height:1.6;">
         ⚡ 开启录音后可返回首页正常使用<br>
         🔒 全程无录音标识，保护面诊隐私<br>
-        📝 录音结束后支持一键转文字
+        📝 录音结束后支持一键转文字<br>
+        💡 iOS用户：若无法录音，可先在「语音备忘录」录好后上传
       </div>
     </div>
   `;
@@ -3070,27 +3109,141 @@ function renderRecording(view) {
 }
 
 function startRecording() {
+  // 详细诊断浏览器能力
+  const ua = navigator.userAgent;
+  const isWechat = /MicroMessenger/i.test(ua);
+  const isIOS = /iPad|iPhone|iPod/i.test(ua);
+  const isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS/i.test(ua);
+  const isStandalone = window.navigator.standalone === true;
+
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showToast('当前浏览器不支持录音功能，请使用Chrome或Safari');
+    if (isWechat) {
+      showToast('微信内置浏览器不支持录音，请在Safari中打开');
+    } else if (isIOS && !isStandalone) {
+      showModal('📱 iOS Safari录音说明', `
+        <div style="line-height:1.8;font-size:14px;color:#333;">
+          <p style="margin:8px 0;color:#E91E63;font-weight:600;">⚠️ iOS Safari不支持网页内录音</p>
+          <p style="margin:12px 0;">这是Apple的安全策略，<b>所有网页录音</b>都需要通过以下方式之一实现：</p>
+          <div style="background:#FFF5F8;padding:12px;border-radius:8px;margin:12px 0;">
+            <b>✅ 推荐方案：用iPhone「语音备忘录」录好后上传</b>
+            <ol style="margin:8px 0;padding-left:20px;font-size:13px;">
+              <li>打开iPhone「语音备忘录」App录音</li>
+              <li>录好后点击分享 → 存储到"文件"</li>
+              <li>回到工作台，点击下方「📁 上传录音文件」</li>
+            </ol>
+          </div>
+          <div style="background:#F0F4FF;padding:12px;border-radius:8px;margin:12px 0;">
+            <b>🔧 另一种方式：将页面添加到主屏幕</b>
+            <ol style="margin:8px 0;padding-left:20px;font-size:13px;">
+              <li>Safari底部分享按钮 → 添加到主屏幕</li>
+              <li>从主屏幕图标进入（脱离Safari）</li>
+              <li>此时可启用录音</li>
+            </ol>
+          </div>
+        </div>
+      `, [{text:'我知道了', primary:true}]);
+      return;
+    }
+    showToast('当前浏览器不支持录音，请使用Chrome浏览器');
     return;
   }
+
   navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
     isRecording = true;
     audioChunks = [];
     recordingStartTime = Date.now();
-    mediaRecorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
+                     MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
+                     MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
       stream.getTracks().forEach(t => t.stop());
       saveRecordingBlob();
     };
-    mediaRecorder.start(1000); // 每秒收集一次数据
+    mediaRecorder.start(1000);
     updateRecordingUI();
     showToast('🔒 录音已开始（静默模式）');
     speak('开始录音');
-  }).catch(() => {
-    showToast('无法获取麦克风权限，请检查浏览器设置');
+  }).catch(err => {
+    console.error('录音错误:', err.name, err.message);
+    let msg = '无法获取麦克风权限';
+    let detail = '';
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      msg = '麦克风权限被拒绝';
+      if (isWechat) {
+        detail = '微信内置浏览器不支持录音。请点击右上角「...」→「在Safari中打开」，或改用「语音备忘录」录好后上传。';
+      } else if (isIOS) {
+        detail = 'iOS设置→Safari→麦克风权限，检查是否被禁用。或直接用「语音备忘录」录好后上传。';
+      } else {
+        detail = '请检查浏览器地址栏左侧是否有权限图标，点击允许后刷新页面重试。';
+      }
+    } else if (err.name === 'NotFoundError') {
+      msg = '未找到麦克风设备';
+      detail = '请确认手机麦克风未被占用。';
+    } else if (err.name === 'NotReadableError') {
+      msg = '麦克风被其他应用占用';
+      detail = '请关闭其他正在使用麦克风的应用（如微信语音通话、抖音等）后重试。';
+    }
+    showModal('🎙️ ' + msg, `
+      <div style="line-height:1.8;font-size:14px;color:#333;padding:8px 0;">
+        <p style="margin:8px 0;color:#E91E63;font-weight:600;">${msg}</p>
+        <p style="margin:8px 0;font-size:13px;color:#666;">${detail}</p>
+        <div style="background:#FFF5F8;padding:12px;border-radius:8px;margin:12px 0;">
+          <b>💡 备用方案：用iPhone「语音备忘录」录好后上传</b>
+          <ol style="margin:6px 0;padding-left:20px;font-size:12px;color:#666;line-height:1.6;">
+            <li>打开iPhone「语音备忘录」App录音</li>
+            <li>录好后点击分享 → 存储到「文件」</li>
+            <li>点击下方「📁 上传录音文件」按钮上传</li>
+          </ol>
+        </div>
+      </div>
+    `, [{text:'🔊 前往语音备忘录', primary:false, onClick: () => {
+      // 自动跳转iPhone语音备忘录 (深度链接,可能不生效)
+      window.location.href = 'shortcuts://'; // 仅供参考
+    }}, {text:'📁 去上传录音', primary:true, onClick: () => uploadAudioFile()}]);
   });
+}
+
+// 上传本地音频文件 (iOS语音备忘录降级方案)
+function uploadAudioFile() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'audio/*,.m4a,.mp3,.wav,.aac,.caf';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const blob = new Blob([ev.target.result], { type: file.type });
+      audioChunks = [blob];
+      recordingStartTime = Date.now() - 60; // 估算1分钟
+      isRecording = false;
+      const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
+      const id = 'rec_' + Date.now();
+      const recordings = Store.get('recordings', []);
+      const date = new Date().toISOString().slice(0, 16).replace('T', ' ');
+      recordings.unshift({
+        id,
+        date,
+        filename: file.name,
+        size: file.size,
+        duration,
+        mimeType: file.type || 'audio/m4a',
+        source: 'upload',
+        customerName: '',
+        customerPhone: '',
+        transcript: ''
+      });
+      Store.set('recordings', recordings);
+      const view = document.getElementById('view-recording_review');
+      if (view) renderRecordingReview(view);
+      showToast('✅ 已上传：' + file.name + '（' + Math.round(file.size/1024) + 'KB）');
+      speak('上传成功');
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  input.click();
 }
 
 function updateRecordingUI() {
