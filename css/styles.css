@@ -872,6 +872,48 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
   padding: 8px 4px; border-top: 1px dashed #E0E0E0;
 }
 
+/* ===== 按日期分组活动列表 ===== */
+.cust-date-group {
+  margin-bottom: 20px;
+}
+.cust-date-group-header {
+  font-size: 14px; font-weight: 700; color: #555;
+  padding: 10px 14px; margin-bottom: 6px;
+  background: linear-gradient(135deg, #FFF5F8 0%, #FFF 100%);
+  border-radius: 10px; border: 1px solid #FFD1DC;
+  display: flex; align-items: center; gap: 6px;
+}
+.cust-activity-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; margin-bottom: 6px;
+  background: #fff; border-radius: 10px;
+  border: 1px solid #F0F0F0;
+  cursor: pointer; transition: all 0.2s;
+}
+.cust-activity-item:active { background: #FFF5F8; transform: scale(0.99); }
+.cust-activity-item.completed { opacity: 0.55; }
+.cust-activity-type {
+  font-size: 20px; flex-shrink: 0; width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  background: #FFF5F8; border-radius: 10px;
+}
+.cust-activity-body { flex: 1; min-width: 0; }
+.cust-activity-name {
+  font-size: 14px; font-weight: 600; color: #333;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.cust-activity-project {
+  font-size: 11px; background: #F3E8FF; color: #7C3AED;
+  padding: 2px 8px; border-radius: 10px; font-weight: 500;
+}
+.cust-activity-summary {
+  font-size: 12px; color: #888; margin-top: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;
+}
+.cust-activity-arrow {
+  font-size: 22px; color: #CCC; flex-shrink: 0;
+}
+
 /* ===== 云端同步样式 ===== */
 #cloudSyncCard { border: 1px solid #D1E3FF; background: linear-gradient(135deg, #F5FAFF 0%, #F0F7FF 100%); }
 #cloudStatus { line-height: 1.8; }
