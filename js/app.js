@@ -15,6 +15,8 @@ let exerciseCategory = '全身';
 // ===== LocalStorage 管理 =====
 let _backupTimer = null;
 let _cloudSyncTimer = null;
+let _lastAutoBackup = 0;      // 上次备份时间戳（节流用）
+let _lastCloudSync = 0;       // 上次云同步时间戳（节流用）
 const DATA_KEYS = ['tasks', 'completions', 'leaves', 'reminders', 'accounting', 'engProgress', 'voiceOn', 'customers', 'consumption', 'recordings', 'voicePrefs', 'reviewReports', 'notes'];
 
 const Store = {
@@ -24,12 +26,12 @@ const Store = {
   },
   set(key, val) {
     localStorage.setItem('mm_' + key, JSON.stringify(val));
-    // 延迟自动备份（防抖，避免频繁写入）
+    // 延迟自动备份（防抖 + 节流，避免频繁打包大对象导致卡顿）
     if (_backupTimer) clearTimeout(_backupTimer);
-    _backupTimer = setTimeout(() => autoBackup(), 2000);
-    // 延迟云端同步（防抖，避免频繁请求）
+    _backupTimer = setTimeout(() => autoBackup(), 8000);
+    // 延迟云端同步（防抖 + 节流，避免频繁加密上传 GitHub）
     if (_cloudSyncTimer) clearTimeout(_cloudSyncTimer);
-    _cloudSyncTimer = setTimeout(() => pushToCloud(), 5000);
+    _cloudSyncTimer = setTimeout(() => pushToCloud(), 20000);
   },
   del(key) { localStorage.removeItem('mm_' + key); }
 };
@@ -265,6 +267,10 @@ const CloudSync = {
 // ===== 云端同步对外接口（非async, 由调用方处理） =====
 function pushToCloud() {
   if (!CloudSync.isConnected()) return;
+  // 节流：距上次云同步不足 3 分钟则跳过
+  const now = Date.now();
+  if (now - _lastCloudSync < 180000) return;
+  _lastCloudSync = now;
   CloudSync.push().then(r => {
     if (r.ok) updateCloudSyncUI();
   }).catch(() => {});
@@ -1559,8 +1565,14 @@ let custSearchKeyword = '';
 
 function renderCustomers(view) {
   let customers = Store.get('customers', []);
-  customers = migrateCustomers(customers);
-  Store.set('customers', customers);
+  const migrated = migrateCustomers(customers);
+  // 仅当迁移产生变化时才写回（避免每次渲染触发备份/云同步）
+  if (migrated !== customers) {
+    try {
+      if (JSON.stringify(migrated) !== JSON.stringify(customers)) Store.set('customers', migrated);
+    } catch(e) { Store.set('customers', migrated); }
+    customers = migrated;
+  }
 
   // 搜索过滤
   const keyword = custSearchKeyword.toLowerCase().trim();
@@ -1871,7 +1883,7 @@ function showCustomerDetail(cid) {
             <div style="font-size:12px;color:#999;">${dur} · ${r.transcript && r.transcript.length > 0 ? '已转写' : '待转写'}</div>
           </div>
           ${r.transcript && r.transcript.length > 0
-            ? `<button class="btn btn-sm btn-outline" onclick="closeModal();switchView('recording_review');setTimeout(()=>viewTranscript('${r.id}'),200)">📄 查看文稿</button>`
+            ? `<button class="btn btn-sm btn-outline" onclick="closeModal();switchView('recording_review');setTimeout(()=>viewTranscriptSync('${r.id}'),250)">📄 查看文稿</button>`
             : `<button class="btn btn-sm btn-outline" onclick="closeModal();switchView('recording_review')">📝 去转写</button>`
           }
         </div>
@@ -2546,7 +2558,8 @@ function renderSettings(view) {
       <div style="font-size:12px;color:var(--text-light);line-height:1.7;">
         🎙️ 分析面诊录音转写对话，结构化输出6大模块（基础情况/诉求/异议/意向项目/预算/跟进建议）<br>
         📝 分析结果可<b style="color:var(--pink);">一键回填顾客跟进记录</b>，免手动抄写<br>
-        🔑 支持 DeepSeek / 通义千问 / OpenAI 兼容接口
+        🔑 支持 DeepSeek / 通义千问 / OpenAI 兼容接口<br>
+        🎧 语音转写：${aiSettings.asrApiKey ? '✅ 已配置' : '⚠️ 未配置（外部导入音频需配置后转写）'}
       </div>
     </div>
   `;
@@ -2689,6 +2702,10 @@ const BACKUP_KEY = 'mm_backup';
 const BACKUP_TIME_KEY = 'mm_backup_time';
 
 function autoBackup() {
+  // 节流：距上次备份不足 60 秒则跳过（高频率 Store.set 不再重复打包）
+  const now = Date.now();
+  if (now - _lastAutoBackup < 60000) return;
+  _lastAutoBackup = now;
   try {
     const data = {};
     let hasData = false;
@@ -3208,37 +3225,42 @@ function renderRecordingContent(container) {
       <div style="font-size:24px;font-weight:800;color:var(--pink);margin-bottom:12px;display:none;" id="recTimer">00:00</div>
       <div id="liveTranscript" style="display:none;max-height:150px;overflow-y:auto;background:var(--pink-soft);border-radius:10px;padding:10px;margin-bottom:10px;font-size:13px;line-height:1.8;text-align:left;"></div>
       <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
-        <button class="btn btn-primary" id="recStartBtn" onclick="startRecording()" style="padding:10px 24px;">▶ 开始录音</button>
+        <button class="btn btn-primary" id="recStartBtn" onclick="startConsultRecording()" style="padding:10px 24px;">▶ 开始录音</button>
+        <button class="btn" style="background:#FF9800;color:#fff;display:none;" id="recPauseBtn" onclick="togglePauseRecording()">⏸ 暂停</button>
         <button class="btn" style="background:#F44336;color:#fff;display:none;" id="recStopBtn" onclick="stopRecording()">⏹ 结束录音</button>
       </div>
       <div style="margin-top:10px;">
-        <button class="btn btn-outline" onclick="uploadAudioFile()" style="padding:8px 16px;font-size:13px;border-style:dashed;">📁 上传录音文件（iPhone用户推荐）</button>
+        <button class="btn btn-outline" onclick="uploadAudioFile()" style="padding:8px 16px;font-size:13px;border-style:dashed;">📁 导入录音文件（支持iPhone语音备忘录）</button>
       </div>
       <div style="font-size:11px;color:var(--text-light);margin-top:10px;line-height:1.6;">
         ⚡ 录音时自动同步转写文字（需Chrome浏览器）<br>
         🔒 全程无录音标识，保护面诊隐私<br>
         📝 录音结束后文字稿自动生成，可编辑修正<br>
         🎯 支持音频回放时文字同步高亮定位<br>
-        💡 iOS用户：若无法录音，可先在「语音备忘录」录好后上传
+        📁 外部导入的录音同样支持AI转写与AI分析<br>
+        💡 iOS用户：可在「语音备忘录」录好后导入
       </div>
     </div>
   `;
-  // 录音列表
+  // 录音列表（性能优化：reviewId 集合一次性构建，避免每项全量扫描 reviewReports）
   if (recordings.length > 0) {
+    const reviewedIds = new Set((Store.get('reviewReports', []) || []).map(rv => rv.recordingId));
     html += `<div class="section-title">历史录音 (${recordings.length})</div>`;
     [...recordings].reverse().forEach(r => {
       const dur = r.duration ? Math.floor(r.duration/60)+'分'+Math.floor(r.duration%60)+'秒' : '未知';
       const hasTranscript = r.transcript && r.transcript.length > 0;
       const linkedCustomer = r.customerName || '';
-      const hasAIAnalysis = Store.get('reviewReports', []).some(rv => rv.recordingId === r.id);
+      const hasAIAnalysis = reviewedIds.has(r.id);
+      const isUpload = r.source === 'upload';
       html += `
         <div class="recording-item" id="rec-${r.id}">
           <div class="recording-item-header">
-            <span style="font-size:16px;">🎵</span>
-            <div style="flex:1;">
-              <div style="font-weight:700;font-size:14px;">${linkedCustomer ? '👤 '+linkedCustomer : '未关联顾客'}</div>
+            <span style="font-size:16px;">${isUpload ? '📁' : '🎵'}</span>
+            <div style="flex:1;min-width:0;">
+              <div style="font-weight:700;font-size:14px;">${linkedCustomer ? '👤 '+linkedCustomer : '未关联顾客'}${isUpload ? '<span style="font-size:11px;color:var(--text-light);font-weight:400;"> · ' + (r.filename||'外部音频') + '</span>' : ''}</div>
               <div style="font-size:12px;color:var(--text-light);">${r.date} · ${dur}</div>
             </div>
+            ${isUpload ? '<span class="tag tag-purple">导入</span>' : ''}
             ${hasAIAnalysis ? '<span class="tag tag-green">已分析</span>' : hasTranscript ? '<span class="tag tag-green">已转写</span>' : '<span class="tag tag-orange">待转写</span>'}
             ${r.autoTranscribed ? '<span class="tag tag-blue">自动</span>' : ''}
           </div>
@@ -3314,7 +3336,9 @@ function renderRecording(view) {
   renderRecordingContent(view);
 }
 
-function startRecording() {
+function startConsultRecording() {
+  // 防重入：录音中禁止再次点击（按钮即时响应保障）
+  if (isRecording) { showToast('⏳ 正在录音中，请先点击结束'); return; }
   // 详细诊断浏览器能力
   const ua = navigator.userAgent;
   const isWechat = /MicroMessenger/i.test(ua);
@@ -3322,7 +3346,7 @@ function startRecording() {
   const isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS/i.test(ua);
   const isStandalone = window.navigator.standalone === true;
 
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
     if (isWechat) {
       showToast('微信内置浏览器不支持录音，请在Safari中打开');
     } else if (isIOS && !isStandalone) {
@@ -3355,17 +3379,34 @@ function startRecording() {
   }
 
   navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    try {
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
+                       MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
+                       MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    } catch(e) {
+      // MediaRecorder 创建失败 → 立即释放麦克风并复位，避免假录音
+      stream.getTracks().forEach(t => t.stop());
+      mediaRecorder = null;
+      forceResetRecording();
+      showToast('⚠️ 录音器创建失败，请改用「上传录音文件」');
+      return;
+    }
     isRecording = true;
     audioChunks = [];
     recordingStartTime = Date.now();
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
-                     MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
-                     MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
-    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
       stream.getTracks().forEach(t => t.stop());
       saveRecordingBlob();
+    };
+    mediaRecorder.onerror = () => {
+      // 录制器运行错误 → 自动停止并复位，杜绝后台静默录制
+      if (isRecording) {
+        try { mediaRecorder.stop(); } catch(e) {}
+        forceResetRecording();
+        showToast('⚠️ 录音异常中断，已自动保存');
+      }
     };
     mediaRecorder.start(1000);
     // 同步启动实时语音转文字
@@ -3375,6 +3416,7 @@ function startRecording() {
     speak('开始录音');
   }).catch(err => {
     console.error('录音错误:', err.name, err.message);
+    forceResetRecording();
     let msg = '无法获取麦克风权限';
     let detail = '';
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -3413,61 +3455,165 @@ function startRecording() {
   });
 }
 
-// 上传本地音频文件 (iOS语音备忘录降级方案)
-function uploadAudioFile() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'audio/*,.m4a,.mp3,.wav,.aac,.caf';
-  input.onchange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const blob = new Blob([ev.target.result], { type: file.type });
-      audioChunks = [blob];
-      recordingStartTime = Date.now() - 60; // 估算1分钟
-      isRecording = false;
-      const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
-      const id = 'rec_' + Date.now();
-      const recordings = Store.get('recordings', []);
-      const date = new Date().toISOString().slice(0, 16).replace('T', ' ');
-      recordings.unshift({
-        id,
-        date,
-        filename: file.name,
-        size: file.size,
-        duration,
-        mimeType: file.type || 'audio/m4a',
-        source: 'upload',
-        customerName: '',
-        customerPhone: '',
-        transcript: ''
-      });
-      Store.set('recordings', recordings);
-      const view = document.getElementById('view-recording_review');
-      if (view) renderRecordingReview(view);
-      showToast('✅ 已上传：' + file.name + '（' + Math.round(file.size/1024) + 'KB）');
-      speak('上传成功');
-    };
-    reader.readAsArrayBuffer(file);
-  };
-  input.click();
-}
-
-function updateRecordingUI() {
+// 兜底复位：录音状态异常时强制恢复UI与状态，杜绝假录音/后台静默录制
+// options.noStop=true 时不再主动 stop（由调用方负责触发保存流程）
+function forceResetRecording(options = {}) {
+  isRecording = false;
+  if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
+  stopLiveTranscription();
+  if (!options.noStop && mediaRecorder && mediaRecorder.state === 'recording') {
+    try { mediaRecorder.stop(); } catch(e) {}
+  }
+  if (currentPlaybackAudio) {
+    try { currentPlaybackAudio.pause(); } catch(e) {}
+    currentPlaybackAudio = null;
+  }
   const startBtn = document.getElementById('recStartBtn');
+  const pauseBtn = document.getElementById('recPauseBtn');
   const stopBtn = document.getElementById('recStopBtn');
   const statusEl = document.getElementById('recStatus');
   const iconEl = document.getElementById('recIcon');
   const timerEl = document.getElementById('recTimer');
   const liveEl = document.getElementById('liveTranscript');
-  if (startBtn) startBtn.style.display = 'none';
-  if (stopBtn) stopBtn.style.display = 'inline-block';
-  if (statusEl) statusEl.textContent = '● 录音中... 实时转写已开启';
-  if (iconEl) iconEl.textContent = '🔴';
+  if (startBtn) { startBtn.style.display = 'inline-block'; startBtn.disabled = false; }
+  if (pauseBtn) { pauseBtn.style.display = 'none'; pauseBtn.disabled = false; pauseBtn.textContent = '⏸ 暂停'; }
+  if (stopBtn) { stopBtn.style.display = 'none'; stopBtn.disabled = false; stopBtn.classList.remove('rec-live'); }
+  if (statusEl) { statusEl.textContent = '准备录音'; statusEl.classList.remove('rec-live'); }
+  if (iconEl) { iconEl.textContent = '🎙️'; iconEl.classList.remove('rec-live'); }
+  if (timerEl) { timerEl.style.display = 'none'; timerEl.textContent = '00:00'; }
+  if (liveEl) liveEl.style.display = 'none';
+}
+
+// ===== 暂停/继续录音 =====
+function togglePauseRecording() {
+  if (!mediaRecorder || !isRecording) return;
+  const pauseBtn = document.getElementById('recPauseBtn');
+  const statusEl = document.getElementById('recStatus');
+  const timerEl = document.getElementById('recTimer');
+  if (mediaRecorder.state === 'recording') {
+    try { mediaRecorder.pause(); } catch(e) {}
+    if (pauseBtn) pauseBtn.textContent = '▶ 继续';
+    if (statusEl) statusEl.textContent = '⏸ 已暂停';
+    if (timerEl) { timerEl.style.opacity = '0.5'; }
+    showToast('⏸ 录音已暂停');
+  } else if (mediaRecorder.state === 'paused') {
+    try { mediaRecorder.resume(); } catch(e) {}
+    if (pauseBtn) pauseBtn.textContent = '⏸ 暂停';
+    if (statusEl) statusEl.textContent = '● 录音中... 实时转写已开启';
+    if (timerEl) { timerEl.style.opacity = '1'; }
+    showToast('▶ 录音继续');
+  }
+}
+
+// ===== 上传本地音频文件（支持苹果语音备忘录导出的 m4a）=====
+function uploadAudioFile() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'audio/*,.m4a,.mp3,.wav,.aac,.caf,.amr,.ogg,.opus,.flac,.aiff';
+  input.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    // 1. 读取真实时长（元数据）
+    let duration = 0;
+    try {
+      const url = URL.createObjectURL(file);
+      duration = await new Promise(resolve => {
+        const a = new Audio();
+        let done = false;
+        const finish = v => { if (!done) { done = true; resolve(v); } };
+        a.onloadedmetadata = () => finish(Math.round(a.duration) || 0);
+        a.onerror = () => finish(0);
+        a.src = url;
+        setTimeout(() => finish(0), 6000); // 6s 超时兜底
+      });
+      URL.revokeObjectURL(url);
+    } catch(err) { duration = 0; }
+    // 2. 音频 blob 存入 IndexedDB（与内部录制同等待遇）
+    const id = 'rec_' + Date.now();
+    try { await AudioDB.save(id, file); }
+    catch(err) { showToast('❌ 音频保存失败，请重试'); return; }
+    const rec = {
+      id,
+      date: formatDateTime(new Date()),
+      filename: file.name,
+      size: file.size,
+      duration: duration,
+      mimeType: file.type || (file.name.toLowerCase().endsWith('.m4a') ? 'audio/mp4' : 'audio/*'),
+      source: 'upload',
+      hasAudio: true,
+      customerName: '', customerPhone: '',
+      transcript: '', segments: [], autoTranscribed: false
+    };
+    const recordings = Store.get('recordings', []);
+    recordings.push(rec);
+    Store.set('recordings', recordings);
+    // 3. 刷新列表
+    refreshRecordingList();
+    showToast('✅ 已导入：' + file.name + (duration ? '（' + Math.floor(duration/60) + '分' + Math.floor(duration%60) + '秒）' : ''));
+    speak('导入成功');
+    // 4. 引导绑定顾客档案（可跳过）
+    showLinkCustomerModal(id);
+  };
+  input.click();
+}
+
+// 刷新录音列表（兼容不同视图容器）
+function refreshRecordingList() {
+  const container = document.getElementById('reviewTabContent');
+  if (container) { renderReviewTabContent(); return; }
+  const v = document.getElementById('view-recording_review');
+  if (v) { renderRecordingReview(v); return; }
+  const v2 = document.getElementById('view-recording');
+  if (v2) renderRecording(v2);
+}
+
+// 上传/录音完成后引导绑定顾客（可选：选择已有顾客 或 暂不关联）
+function showLinkCustomerModal(id) {
+  const customers = Store.get('customers', []);
+  const activeCustomers = customers.filter(c => !c.completed);
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">👤 关联顾客档案（可选）</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:13px;color:var(--text-light);margin-bottom:10px;">录音将跟随所选顾客档案归档，历史可随时回看</div>
+  `;
+  if (activeCustomers.length > 0) {
+    html += `<div style="max-height:260px;overflow-y:auto;">`;
+    activeCustomers.forEach(c => {
+      html += `<div style="padding:12px;border-bottom:1px solid #F5F5F5;cursor:pointer;border-radius:6px;" onclick="doLinkRecording('${id}','${c.name.replace(/'/g, "\\'")}','${(c.contact||'').replace(/'/g, "\\'")}')">
+        <div style="font-weight:700;">${c.name}</div>
+        <div style="font-size:12px;color:var(--text-light);">${c.contact||'未留电话'} · ${(c.projects||[]).map(p=>p.name).join('、')||'暂无项目'}</div>
+      </div>`;
+    });
+    html += `</div>`;
+  } else {
+    html += `<div class="empty-state"><div class="es-icon">👥</div><div class="es-text">暂无顾客档案</div></div>`;
+  }
+  html += `<div style="display:flex;gap:8px;margin-top:10px;">
+    <button class="btn btn-outline" style="flex:1;" onclick="showAddCustomerPrefilled('', '')">➕ 新建顾客</button>
+    <button class="btn btn-primary" style="flex:1;" onclick="closeModal()">暂不关联</button>
+  </div>`;
+  showModal(html);
+}
+
+function updateRecordingUI() {
+  const startBtn = document.getElementById('recStartBtn');
+  const pauseBtn = document.getElementById('recPauseBtn');
+  const stopBtn = document.getElementById('recStopBtn');
+  const statusEl = document.getElementById('recStatus');
+  const iconEl = document.getElementById('recIcon');
+  const timerEl = document.getElementById('recTimer');
+  const liveEl = document.getElementById('liveTranscript');
+  if (startBtn) { startBtn.style.display = 'none'; startBtn.disabled = true; }
+  if (pauseBtn) { pauseBtn.style.display = 'inline-block'; pauseBtn.disabled = false; pauseBtn.textContent = '⏸ 暂停'; }
+  if (stopBtn) { stopBtn.style.display = 'inline-block'; stopBtn.disabled = false; stopBtn.classList.add('rec-live'); }
+  if (statusEl) { statusEl.textContent = '● 录音中... 实时转写已开启'; statusEl.classList.add('rec-live'); }
+  if (iconEl) { iconEl.textContent = '🔴'; iconEl.classList.add('rec-live'); }
   if (liveEl) liveEl.style.display = 'block';
   if (timerEl) {
     timerEl.style.display = 'block';
+    timerEl.style.opacity = '1';
     if (recordingTimer) clearInterval(recordingTimer);
     recordingTimer = setInterval(() => {
       if (!isRecording) { clearInterval(recordingTimer); return; }
@@ -3480,17 +3626,34 @@ function updateRecordingUI() {
 }
 
 function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  // 兜底：无录音器或已停止时，仍强制复位UI与状态（确保按钮永远可点）
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    if (isRecording) {
+      isRecording = false;
+      if (recordingTimer) clearInterval(recordingTimer);
+      stopLiveTranscription();
+    }
+    forceResetRecording();
+    showToast('录音已停止');
+    return;
+  }
   isRecording = false;
   if (recordingTimer) clearInterval(recordingTimer);
   stopLiveTranscription();
-  mediaRecorder.stop();
+  // 按钮立即复位，避免等待 saveRecordingBlob 异步完成导致二次点击无响应
+  forceResetRecording({ noStop: true });
+  try {
+    mediaRecorder.stop();
+  } catch(e) {
+    showToast('⚠️ 录音停止异常，已自动复位');
+  }
   showToast('录音已保存，正在整理文字稿...');
   speak('录音结束');
 }
 
 async function saveRecordingBlob() {
-  const blob = new Blob(audioChunks, { type: 'audio/webm' });
+  const mimeType = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+  const blob = new Blob(audioChunks, { type: mimeType });
   const id = 'rec_' + Date.now();
   const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
   // 保存实时转写的文字稿
@@ -3499,6 +3662,8 @@ async function saveRecordingBlob() {
   const rec = {
     id, date: formatDateTime(new Date()), duration,
     hasAudio: true,
+    mimeType: mimeType,
+    source: 'record',
     transcript: transcript,
     segments: segments,
     autoTranscribed: transcript.length > 0,
@@ -3511,11 +3676,8 @@ async function saveRecordingBlob() {
   // 清空实时转写状态
   liveTranscriptText = '';
   liveTranscriptSegments = [];
-  // 重新渲染
-  let view = document.getElementById('view-recording_review');
-  if (view) { renderRecordingReview(view); return; }
-  view = document.getElementById('view-recording');
-  if (view) renderRecording(view);
+  // 重新渲染（复用统一刷新入口）
+  refreshRecordingList();
   // 如果有转写文字，自动提示
   if (transcript) {
     setTimeout(() => showToast('✅ 文字稿已自动生成（' + transcript.length + '字）'), 500);
@@ -3545,7 +3707,15 @@ function transcribeRecording(id) {
     </div>
     <div style="font-size:13px;color:var(--text-light);margin-bottom:12px;">
       ${rec.date} · ${rec.duration ? Math.floor(rec.duration/60)+'分'+rec.duration%60+'秒' : ''}
+      ${rec.source === 'upload' ? '<span class="tag tag-blue" style="margin-left:6px;">外部导入</span>' : ''}
     </div>
+    ${rec.source === 'upload' || !rec.segments || rec.segments.length === 0 ? `
+    <div style="background:#FFF5F8;padding:12px;border-radius:8px;margin-bottom:12px;">
+      <div style="font-size:13px;font-weight:700;color:var(--pink);margin-bottom:6px;">🤖 AI 一键转写</div>
+      <div style="font-size:12px;color:#999;margin-bottom:8px;">上传的录音文件无法用浏览器语音识别，推荐用 AI 云端转写自动生成完整中文文稿</div>
+      <button class="btn btn-primary btn-full btn-sm" onclick="transcribeWithAI('${id}')" style="font-size:13px;">🎙️ 开始 AI 转写</button>
+    </div>
+    ` : ''}
     <div style="margin-bottom:8px;">
       <div class="section-title" style="margin:0 0 6px;">请输入顾客信息</div>
       <input class="input-field" id="transName" placeholder="顾客姓名" value="${rec.customerName||''}">
@@ -3607,6 +3777,113 @@ function addSegment(role) {
   if (ta) {
     ta.value += (ta.value ? '\n' : '') + '【' + role + '】：';
     ta.focus();
+  }
+}
+
+// 根据录音信息推断上传文件名扩展名（Whisper 需要）
+function getAudioExt(rec) {
+  const mime = (rec.mimeType || '').toLowerCase();
+  if (mime.includes('webm')) return 'webm';
+  if (mime.includes('mp4') || mime.includes('m4a') || mime.includes('aac')) return 'm4a';
+  if (mime.includes('mp3')) return 'mp3';
+  if (mime.includes('wav')) return 'wav';
+  if (mime.includes('ogg')) return 'ogg';
+  if (mime.includes('flac')) return 'flac';
+  const fn = (rec.filename || '').toLowerCase();
+  const m = fn.match(/\.([a-z0-9]{2,4})$/);
+  if (m) return m[1];
+  return 'webm';
+}
+
+// ===== AI 云端转写（Whisper兼容接口，内外录音通用）=====
+async function transcribeWithAI(id) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === id);
+  if (!rec) return;
+  const settings = getAISettings();
+  if (!settings.asrApiKey) {
+    showModal('🎙️ 需要配置语音转写服务', `
+      <div style="line-height:1.8;font-size:14px;color:#333;padding:8px 0;">
+        <p style="margin:8px 0;color:#E91E63;font-weight:600;">⚡ AI转写需要配置语音转写服务</p>
+        <p style="margin:8px 0;font-size:13px;color:#666;">外部导入的音频（如苹果语音备忘录）用 AI 云端转写自动生成中文文稿，支持 OpenAI Whisper 及兼容接口（阿里云百炼等）。</p>
+        <p style="margin:8px 0;font-size:13px;color:#666;">配置位置：设置 → 🤖 AI智能分析 → 🎙️ 语音转写服务</p>
+      </div>
+    `, [
+      { text: '🔧 去配置', primary: true, onClick: () => { closeModal(); switchView('settings'); setTimeout(() => showAISettingsModal(), 300); } },
+      { text: '📝 手动输入', primary: false, onClick: () => transcribeRecording(id) }
+    ]);
+    return;
+  }
+  const asr = AI_CONFIG.asr[settings.asrProvider] || AI_CONFIG.asr.openai;
+  const base = (settings.asrBaseUrl || asr.base).replace(/\/+$/, '');
+  const model = settings.asrModel || 'whisper-1';
+  const blob = await AudioDB.get(id);
+  if (!blob) { showToast('❌ 音频文件丢失，无法转写'); return; }
+
+  showModal('🎙️ AI转写中', `
+    <div style="text-align:center;padding:20px;">
+      <div style="font-size:36px;margin-bottom:10px;">🎙️</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:8px;">正在AI转写音频...</div>
+      <div style="font-size:13px;color:var(--text-light);">${rec.filename || '录音'} · ${rec.duration ? Math.floor(rec.duration/60)+'分'+rec.duration%60+'秒' : ''}</div>
+      <div style="margin-top:12px;font-size:12px;color:var(--pink);">⏳ 音频越长耗时越久，请耐心等待</div>
+    </div>
+  `);
+  try {
+    const ext = getAudioExt(rec);
+    const fd = new FormData();
+    fd.append('file', blob, 'recording.' + ext);
+    fd.append('model', model);
+    fd.append('language', 'zh');
+    fd.append('response_format', 'verbose_json'); // 获取分段时间戳，支持播放定位高亮
+    const res = await fetch(base + '/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${settings.asrApiKey}` },
+      body: fd
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`转写服务返回 ${res.status}: ${errText.slice(0,150)}`);
+    }
+    const data = await res.json();
+    let text = (data && data.text || '').trim();
+    if (!text && typeof data === 'string') text = data.trim();
+    if (!text) throw new Error('转写结果为空，请检查音频是否有人声');
+    // 解析带时间戳的分段（verbose_json），兼容仅返回纯文本的服务
+    let segs = [];
+    if (Array.isArray(data.segments)) {
+      segs = data.segments.map(s => ({
+        text: (s.text || '').trim(),
+        timeStart: Math.round(s.start || 0),
+        timeEnd: Math.round(s.end || 0) + 1
+      })).filter(s => s.text);
+    }
+    // 保存转写结果
+    const idx = recordings.findIndex(r => r.id === id);
+    if (idx >= 0) {
+      recordings[idx].transcript = text;
+      recordings[idx].segments = segs;
+      recordings[idx].autoTranscribed = true;
+      Store.set('recordings', recordings);
+      // 归集到顾客档案
+      if (recordings[idx].customerName) {
+        autoLinkToCustomerProfile(id, recordings[idx].customerName, recordings[idx].customerPhone || '', text, 'recording');
+      }
+    }
+    closeModal();
+    showToast('✅ AI转写完成（' + text.length + '字）');
+    setTimeout(() => viewTranscriptSync(id), 400);
+  } catch(e) {
+    console.error('AI转写失败:', e);
+    closeModal();
+    showModal('❌ AI转写失败', `
+      <div style="line-height:1.8;font-size:14px;color:#333;padding:8px 0;">
+        <p style="color:var(--red);font-weight:600;">错误信息：${e.message}</p>
+        <p style="margin-top:10px;font-size:13px;color:#666;">常见原因：API Key 错误、接口不支持跨域(CORS)、音频格式不支持</p>
+      </div>
+    `, [
+      { text: '🔧 去设置', primary: false, onClick: () => { closeModal(); switchView('settings'); setTimeout(() => showAISettingsModal(), 300); } },
+      { text: '📝 手动输入', primary: true, onClick: () => { closeModal(); transcribeRecording(id); } }
+    ]);
   }
 }
 
@@ -4081,6 +4358,11 @@ const AI_CONFIG = {
       url: '',
       models: ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo']
     }
+  },
+  // 语音转写服务（Whisper兼容 /audio/transcriptions 端点）
+  asr: {
+    openai: { name: 'OpenAI Whisper', base: 'https://api.openai.com/v1', model: 'whisper-1' },
+    custom: { name: '自定义兼容端点', base: '', model: 'whisper-1' }
   }
 };
 
@@ -4089,7 +4371,11 @@ function getAISettings() {
     provider: 'deepseek',
     apiKey: '',
     model: 'deepseek-chat',
-    customUrl: ''
+    customUrl: '',
+    asrProvider: 'openai',
+    asrApiKey: '',
+    asrBaseUrl: '',
+    asrModel: 'whisper-1'
   });
 }
 
@@ -4106,48 +4392,61 @@ const CLINIC_PROJECTS = [
 ];
 
 // 构建AI分析prompt
+// 构建AI分析prompt（升级版：固定6大模块 + 参考样例）
 function buildAIPrompt(transcript) {
-  return `你是一位资深的医美咨询师AI助手。请分析以下面诊录音转写文本，按JSON格式输出结构化分析结果。
+  return `你是一位资深的医美咨询师AI助手。请分析以下面诊录音转写文本，提取关键信息并**固定输出6大结构化模块**（可直接用于顾客跟进台账）。
 
 ## 面诊对话文本：
 ${transcript}
 
-## 门店可选项目列表：
+## 门店可选项目列表（意向项目只能从这里选）：
 ${CLINIC_PROJECTS.join('、')}
 
-## 输出要求（严格JSON格式，不要输出其他内容）：
+## 输出要求（严格JSON格式，不要输出任何其他内容，不要用markdown代码块包裹）：
 {
   "customerBasics": {
-    "skinIssues": "顾客的皮肤问题描述（如斑点、毛孔、暗沉等）",
-    "agingIssues": "顾客的衰老问题（如法令纹、松弛、下垂等）",
-    "painPoints": "顾客的核心痛点"
+    "skinIssues": "顾客的皮肤问题（斑点/毛孔/暗沉/痘印等），未提及填'未提及'",
+    "agingIssues": "顾客的衰老问题（法令纹/松弛/下垂/眼袋/泪沟等），未提及填'未提及'",
+    "painPoints": "顾客最在意的核心痛点（一句话说清）"
   },
   "customerNeeds": {
-    "wantsToImprove": "想改善的具体问题",
-    "expectedResults": "期待的效果"
+    "wantsToImprove": "顾客想改善的具体问题",
+    "expectedResults": "顾客期待的效果（如'自然'/'性价比高'/'一次见效'等）",
+    "priceSensitivity": "价格敏感度判断（高/中/低）及依据"
   },
   "objections": [
-    {"type": "价格顾虑", "content": "具体顾虑内容"},
-    {"type": "风险顾虑", "content": "具体顾虑内容"}
+    {"type": "价格顾虑|风险顾虑|竞品对比|预算顾虑|其他", "content": "顾客原话或转述的顾虑内容"}
   ],
-  "interestedProjects": ["从门店项目列表中匹配顾客感兴趣的项目"],
+  "interestedProjects": ["从门店项目列表中精确匹配顾客表现出兴趣的项目，一个元素一个项目"],
   "budget": {
-    "acceptableBudget": "可接受预算范围",
-    "paymentMethod": "付款方式",
-    "depositInfo": "欠款尾款信息"
+    "acceptableBudget": "顾客可接受的预算金额范围（如'3000元以内'/'5000-8000元'，未提及填'未提及'）",
+    "paymentMethod": "付款方式信息（分期/一次性/按次付费等，未提及填'未提及'）",
+    "depositInfo": "收款/定金/尾款/欠款信息（未提及填'未提及'）"
   },
   "followUpSuggestions": {
-    "nextActions": "后续跟进动作建议",
-    "keyPoints": "下次沟通重点"
+    "nextActions": "给咨询师的下一步具体跟进动作（建议分1-2-3条）",
+    "keyPoints": "下次沟通重点（如针对某顾虑的讲解要点）"
   },
   "summary": "一句话总结本次面诊"
 }
 
-注意：
-1. 如果对话中未提及某项内容，对应字段填"未提及"
-2. interestedProjects只从门店项目列表中选择
-3. objections数组中只包含顾客实际表达过的顾虑
-4. 请仔细识别医美口语化表达`;
+## 输出参考样例（学习其格式与颗粒度，不要照搬内容）：
+{
+  "customerBasics": {"skinIssues": "眼袋膨出，泪沟凹陷", "agingIssues": "眼袋明显，显疲惫感", "painPoints": "眼袋影响形象，想尽快改善"},
+  "customerNeeds": {"wantsToImprove": "改善眼袋，去掉显老感", "expectedResults": "自然平整，性价比高", "priceSensitivity": "高，多处比价"},
+  "objections": [{"type": "竞品对比", "content": "外部咨询1500元做眼袋，对比本店3000元起"}, {"type": "价格顾虑", "content": "担心价格偏高"}, {"type": "风险顾虑", "content": "担忧手术风险和恢复期"}],
+  "interestedProjects": ["眶隔释放眼袋"],
+  "budget": {"acceptableBudget": "上限3000元", "paymentMethod": "未提及", "depositInfo": "未提及"},
+  "followUpSuggestions": {"nextActions": ["微信发送不同术式对比要点", "提供门店真实案例对比图", "三天后回访跟进"], "keyPoints": "重点讲解不同术式差异，不强求当场成交"},
+  "summary": "顾客对眼袋改善需求明确，预算有限且关注性价比，需以案例和专业讲解建立信任"
+}
+
+## 注意：
+1. 每项必须输出，未提及的填"未提及"，不要编造
+2. 仔细识别医美口语化表达（如'做个眼睛'=眼整形、'打水光'=水光针、'美瑶'=美瑶时光机）
+3. 金额、数字、时间必须原样保留（如'3000'不要写成'三千'）
+4. objections 只列顾客真实表达过的顾虑，type 从枚举中选
+5. interestedProjects 只匹配门店项目列表中的名称`;
 }
 
 // 调用AI API
@@ -4171,11 +4470,11 @@ async function callAIAPI(transcript) {
       body: JSON.stringify({
         model: model,
         messages: [
-          { role: 'system', content: '你是一位专业的医美咨询师AI助手，擅长分析面诊对话并提取关键信息。请严格按照JSON格式输出。' },
+          { role: 'system', content: '你是一位专业的医美咨询师AI助手，擅长分析面诊对话并提取关键信息。必须严格按照要求输出纯JSON，不要用markdown代码块包裹。' },
           { role: 'user', content: prompt }
         ],
-        temperature: 0.3,
-        max_tokens: 2000
+        temperature: 0.2,
+        max_tokens: 2500
       })
     });
     if (!res.ok) {
@@ -4184,9 +4483,11 @@ async function callAIAPI(transcript) {
     }
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content || '';
-    // 提取JSON
+    // 提取JSON（兼容 markdown 代码块包裹）
     let jsonStr = content;
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeBlock) jsonStr = codeBlock[1];
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
     if (jsonMatch) jsonStr = jsonMatch[0];
     const parsed = JSON.parse(jsonStr);
     return { ok: true, data: parsed, raw: content };
@@ -4542,15 +4843,38 @@ function showAISettingsModal() {
     <input class="input-field" id="aiApiKey" type="password" placeholder="sk-..." value="${(s.apiKey || '').replace(/"/g, '&quot;')}">
     <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:12px 0 6px;">自定义接口地址（可选）</label>
     <input class="input-field" id="aiCustomUrl" placeholder="留空使用默认地址" value="${(s.customUrl || '').replace(/"/g, '&quot;')}">
+    <div style="height:1px;background:#F0F0F0;margin:14px 0;"></div>
+    <div style="font-size:13px;font-weight:700;color:var(--pink);margin-bottom:4px;">🎙️ 语音转写服务（音频文件转文字）</div>
+    <div style="font-size:11px;color:#999;margin-bottom:8px;">外部导入的录音（如苹果语音备忘录）用此服务转写；需 Whisper 兼容接口</div>
+    <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:4px 0 6px;">转写服务商</label>
+    <select class="input-field" id="asrProvider" onchange="updateAsrOptions()">
+      <option value="openai" ${s.asrProvider !== 'custom' ? 'selected' : ''}>OpenAI Whisper</option>
+      <option value="custom" ${s.asrProvider === 'custom' ? 'selected' : ''}>自定义兼容端点</option>
+    </select>
+    <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:12px 0 6px;">转写 API Key</label>
+    <input class="input-field" id="asrApiKey" type="password" placeholder="sk-..." value="${(s.asrApiKey || '').replace(/"/g, '&quot;')}">
+    <div id="asrCustomBox" style="display:${s.asrProvider === 'custom' ? 'block' : 'none'};">
+      <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:12px 0 6px;">转写接口地址（自定义）</label>
+      <input class="input-field" id="asrBaseUrl" placeholder="https://api.openai.com/v1" value="${(s.asrBaseUrl || '').replace(/"/g, '&quot;')}">
+    </div>
+    <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:12px 0 6px;">转写模型</label>
+    <input class="input-field" id="asrModel" placeholder="whisper-1" value="${(s.asrModel || 'whisper-1').replace(/"/g, '&quot;')}">
     <div style="background:#FFF5F8;padding:12px;border-radius:8px;margin:12px 0;">
-      <b style="font-size:13px;">📌 推荐 DeepSeek（注册送免费额度）</b><br>
-      <span style="font-size:12px;color:#999;">中文理解能力强、价格低、支持浏览器直连</span><br>
-      <a href="https://platform.deepseek.com" target="_blank" style="font-size:12px;color:var(--pink);">前往 platform.deepseek.com 注册 →</a>
+      <b style="font-size:13px;">📌 说明</b><br>
+      <span style="font-size:12px;color:#999;">若使用 OpenAI 官方 Key，可与上方分析 Key 相同（sk- 通用）。也支持阿里云百炼等 Whisper 兼容端点。</span>
     </div>
     <button class="btn btn-primary btn-full" onclick="saveAISettingsModal()">💾 保存设置</button>
   `;
   showModal(html);
   updateAIModelOptions();
+  updateAsrOptions();
+}
+
+function updateAsrOptions() {
+  const sel = document.getElementById('asrProvider');
+  const box = document.getElementById('asrCustomBox');
+  if (!sel || !box) return;
+  box.style.display = sel.value === 'custom' ? 'block' : 'none';
 }
 
 function updateAIModelOptions() {
@@ -4567,8 +4891,13 @@ function saveAISettingsModal() {
   const model = document.getElementById('aiModel').value;
   const apiKey = document.getElementById('aiApiKey').value.trim();
   const customUrl = document.getElementById('aiCustomUrl').value.trim();
+  // ASR 转写配置（可留空，AI分析Key与转写Key可分别配置）
+  const asrProvider = document.getElementById('asrProvider').value;
+  const asrApiKey = document.getElementById('asrApiKey').value.trim();
+  const asrBaseUrl = document.getElementById('asrBaseUrl').value.trim();
+  const asrModel = document.getElementById('asrModel').value.trim() || 'whisper-1';
   if (!apiKey) { showToast('请填写API Key'); return; }
-  saveAISettings({ provider, model, apiKey, customUrl });
+  saveAISettings({ provider, model, apiKey, customUrl, asrProvider, asrApiKey, asrBaseUrl, asrModel });
   closeModal();
   showToast('✅ AI设置已保存');
   const view = document.getElementById('view-settings');
