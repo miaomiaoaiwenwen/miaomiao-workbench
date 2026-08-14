@@ -2530,6 +2530,27 @@ function renderSettings(view) {
     </div>
   `;
 
+  html += `<div class="section-title">🤖 AI智能分析</div>`;
+  const aiSettings = getAISettings();
+  const aiProviderName = aiSettings.provider ? (AI_CONFIG.providers[aiSettings.provider] ? AI_CONFIG.providers[aiSettings.provider].name : aiSettings.provider) : 'DeepSeek';
+  html += `
+    <div class="card" style="margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <span style="font-size:26px;">🤖</span>
+        <div style="flex:1;">
+          <div style="font-weight:700;font-size:14px;">AI面诊分析</div>
+          <div style="font-size:12px;color:var(--text-light);">${aiSettings.apiKey ? '✅ 已配置（' + aiProviderName + ' / ' + (aiSettings.model || '-') + '）' : '⚠️ 未配置API密钥'}</div>
+        </div>
+        <button class="btn btn-sm ${aiSettings.apiKey ? 'btn-outline' : 'btn-primary'}" onclick="showAISettingsModal()">${aiSettings.apiKey ? '✏️ 修改' : '⚡ 去配置'}</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-light);line-height:1.7;">
+        🎙️ 分析面诊录音转写对话，结构化输出6大模块（基础情况/诉求/异议/意向项目/预算/跟进建议）<br>
+        📝 分析结果可<b style="color:var(--pink);">一键回填顾客跟进记录</b>，免手动抄写<br>
+        🔑 支持 DeepSeek / 通义千问 / OpenAI 兼容接口
+      </div>
+    </div>
+  `;
+
   html += `<div class="section-title">数据管理</div>`;
   html += `
     <div class="card" style="margin-bottom:8px;border:1px solid #FFD1DC;background:#FFF5F8;">
@@ -3057,6 +3078,94 @@ let audioChunks = [];
 let recordingStartTime = null;
 let recordingTimer = null;
 let isRecording = false;
+let liveRecognition = null;
+let liveTranscriptText = '';
+let liveTranscriptSegments = [];
+let liveRecognitionRestartTimer = null;
+let currentPlaybackAudio = null;
+let currentPlaybackHighlightTimer = null;
+
+// ===== 实时语音转文字 =====
+function startLiveTranscription() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    console.log('浏览器不支持SpeechRecognition，将使用手动转写');
+    return;
+  }
+  liveTranscriptText = '';
+  liveTranscriptSegments = [];
+  liveRecognition = new SR();
+  liveRecognition.lang = 'zh-CN';
+  liveRecognition.continuous = true;
+  liveRecognition.interimResults = true;
+
+  liveRecognition.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        const timestamp = Math.floor((Date.now() - recordingStartTime) / 1000);
+        liveTranscriptText += transcript;
+        liveTranscriptSegments.push({
+          text: transcript.trim(),
+          timeStart: timestamp,
+          timeEnd: timestamp + 5
+        });
+        // 实时更新UI
+        const liveEl = document.getElementById('liveTranscript');
+        if (liveEl) {
+          liveEl.innerHTML = liveTranscriptSegments.map(s =>
+            `<span class="ts-seg" data-time="${s.timeStart}">${s.text}</span>`
+          ).join('') + (interim ? `<span class="ts-interim">${interim}</span>` : '');
+          liveEl.scrollTop = liveEl.scrollHeight;
+        }
+      } else {
+        interim += transcript;
+      }
+    }
+    const liveEl = document.getElementById('liveTranscript');
+    if (liveEl && interim) {
+      // 显示临时结果
+      const interimEl = liveEl.querySelector('.ts-interim');
+      if (interimEl) {
+        interimEl.textContent = interim;
+      } else {
+        liveEl.innerHTML += `<span class="ts-interim">${interim}</span>`;
+      }
+      liveEl.scrollTop = liveEl.scrollHeight;
+    }
+  };
+
+  liveRecognition.onerror = (e) => {
+    console.log('SpeechRecognition error:', e.error);
+    if (e.error === 'no-speech' || e.error === 'aborted') return;
+    if (e.error === 'not-allowed') {
+      showToast('语音识别权限被拒绝，仅录音不转写');
+    }
+  };
+
+  liveRecognition.onend = () => {
+    // 自动重启（录音仍在进行时）
+    if (isRecording) {
+      clearTimeout(liveRecognitionRestartTimer);
+      liveRecognitionRestartTimer = setTimeout(() => {
+        if (isRecording && liveRecognition) {
+          try { liveRecognition.start(); } catch(e) { console.log('Recognition restart failed:', e); }
+        }
+      }, 300);
+    }
+  };
+
+  try { liveRecognition.start(); } catch(e) { console.log('Recognition start failed:', e); }
+}
+
+function stopLiveTranscription() {
+  clearTimeout(liveRecognitionRestartTimer);
+  if (liveRecognition) {
+    try { liveRecognition.stop(); } catch(e) {}
+    liveRecognition = null;
+  }
+}
 
 // ===== 录音模块 =====
 // ===== 录音复盘合并视图 =====
@@ -3097,6 +3206,7 @@ function renderRecordingContent(container) {
       <div style="font-size:48px;margin-bottom:8px;" id="recIcon">🎙️</div>
       <div style="font-size:15px;font-weight:700;margin-bottom:4px;" id="recStatus">准备录音</div>
       <div style="font-size:24px;font-weight:800;color:var(--pink);margin-bottom:12px;display:none;" id="recTimer">00:00</div>
+      <div id="liveTranscript" style="display:none;max-height:150px;overflow-y:auto;background:var(--pink-soft);border-radius:10px;padding:10px;margin-bottom:10px;font-size:13px;line-height:1.8;text-align:left;"></div>
       <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
         <button class="btn btn-primary" id="recStartBtn" onclick="startRecording()" style="padding:10px 24px;">▶ 开始录音</button>
         <button class="btn" style="background:#F44336;color:#fff;display:none;" id="recStopBtn" onclick="stopRecording()">⏹ 结束录音</button>
@@ -3105,9 +3215,10 @@ function renderRecordingContent(container) {
         <button class="btn btn-outline" onclick="uploadAudioFile()" style="padding:8px 16px;font-size:13px;border-style:dashed;">📁 上传录音文件（iPhone用户推荐）</button>
       </div>
       <div style="font-size:11px;color:var(--text-light);margin-top:10px;line-height:1.6;">
-        ⚡ 开启录音后可返回首页正常使用<br>
+        ⚡ 录音时自动同步转写文字（需Chrome浏览器）<br>
         🔒 全程无录音标识，保护面诊隐私<br>
-        📝 录音结束后支持一键转文字<br>
+        📝 录音结束后文字稿自动生成，可编辑修正<br>
+        🎯 支持音频回放时文字同步高亮定位<br>
         💡 iOS用户：若无法录音，可先在「语音备忘录」录好后上传
       </div>
     </div>
@@ -3119,6 +3230,7 @@ function renderRecordingContent(container) {
       const dur = r.duration ? Math.floor(r.duration/60)+'分'+Math.floor(r.duration%60)+'秒' : '未知';
       const hasTranscript = r.transcript && r.transcript.length > 0;
       const linkedCustomer = r.customerName || '';
+      const hasAIAnalysis = Store.get('reviewReports', []).some(rv => rv.recordingId === r.id);
       html += `
         <div class="recording-item" id="rec-${r.id}">
           <div class="recording-item-header">
@@ -3127,11 +3239,13 @@ function renderRecordingContent(container) {
               <div style="font-weight:700;font-size:14px;">${linkedCustomer ? '👤 '+linkedCustomer : '未关联顾客'}</div>
               <div style="font-size:12px;color:var(--text-light);">${r.date} · ${dur}</div>
             </div>
-            ${hasTranscript ? '<span class="tag tag-green">已转写</span>' : '<span class="tag tag-orange">待转写</span>'}
+            ${hasAIAnalysis ? '<span class="tag tag-green">已分析</span>' : hasTranscript ? '<span class="tag tag-green">已转写</span>' : '<span class="tag tag-orange">待转写</span>'}
+            ${r.autoTranscribed ? '<span class="tag tag-blue">自动</span>' : ''}
           </div>
           <div class="recording-item-actions">
-            <button class="btn btn-sm btn-outline" onclick="playRecording('${r.id}')">▶ 播放</button>
-            ${!hasTranscript ? `<button class="btn btn-sm btn-primary" onclick="transcribeRecording('${r.id}')">📝 转文字</button>` : `<button class="btn btn-sm btn-outline" onclick="viewTranscript('${r.id}')">📄 查看文稿</button>`}
+            <button class="btn btn-sm btn-outline" onclick="playRecordingSync('${r.id}')">▶ 播放</button>
+            ${hasTranscript ? `<button class="btn btn-sm btn-outline" onclick="viewTranscriptSync('${r.id}')">📄 查看文稿</button>` : `<button class="btn btn-sm btn-primary" onclick="transcribeRecording('${r.id}')">📝 转文字</button>`}
+            ${hasTranscript ? `<button class="btn btn-sm ${hasAIAnalysis ? 'btn-outline' : 'btn-primary'}" onclick="runAIReview('${r.id}')">${hasAIAnalysis ? '📋 AI报告' : '🤖 AI分析'}</button>` : ''}
             ${!linkedCustomer ? `<button class="btn btn-sm btn-outline" onclick="linkToCustomer('${r.id}')">👤 关联顾客</button>` : ''}
             <button class="btn btn-sm btn-outline" style="color:var(--red);border-color:var(--red);" onclick="deleteRecording('${r.id}')">🗑</button>
           </div>
@@ -3254,8 +3368,10 @@ function startRecording() {
       saveRecordingBlob();
     };
     mediaRecorder.start(1000);
+    // 同步启动实时语音转文字
+    startLiveTranscription();
     updateRecordingUI();
-    showToast('🔒 录音已开始（静默模式）');
+    showToast('🔒 录音已开始（静默模式 + 实时转写）');
     speak('开始录音');
   }).catch(err => {
     console.error('录音错误:', err.name, err.message);
@@ -3344,10 +3460,12 @@ function updateRecordingUI() {
   const statusEl = document.getElementById('recStatus');
   const iconEl = document.getElementById('recIcon');
   const timerEl = document.getElementById('recTimer');
+  const liveEl = document.getElementById('liveTranscript');
   if (startBtn) startBtn.style.display = 'none';
   if (stopBtn) stopBtn.style.display = 'inline-block';
-  if (statusEl) statusEl.textContent = '● 录音中...';
+  if (statusEl) statusEl.textContent = '● 录音中... 实时转写已开启';
   if (iconEl) iconEl.textContent = '🔴';
+  if (liveEl) liveEl.style.display = 'block';
   if (timerEl) {
     timerEl.style.display = 'block';
     if (recordingTimer) clearInterval(recordingTimer);
@@ -3365,8 +3483,9 @@ function stopRecording() {
   if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
   isRecording = false;
   if (recordingTimer) clearInterval(recordingTimer);
+  stopLiveTranscription();
   mediaRecorder.stop();
-  showToast('录音已保存，可转写为文字');
+  showToast('录音已保存，正在整理文字稿...');
   speak('录音结束');
 }
 
@@ -3374,20 +3493,33 @@ async function saveRecordingBlob() {
   const blob = new Blob(audioChunks, { type: 'audio/webm' });
   const id = 'rec_' + Date.now();
   const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
+  // 保存实时转写的文字稿
+  const transcript = liveTranscriptText.trim();
+  const segments = liveTranscriptSegments.length > 0 ? [...liveTranscriptSegments] : [];
   const rec = {
     id, date: formatDateTime(new Date()), duration,
-    hasAudio: true, transcript: '', segments: [],
+    hasAudio: true,
+    transcript: transcript,
+    segments: segments,
+    autoTranscribed: transcript.length > 0,
     customerName: '', customerPhone: ''
   };
   await AudioDB.save(id, blob);
   const recordings = Store.get('recordings', []);
   recordings.push(rec);
   Store.set('recordings', recordings);
-  // 重新渲染（兼容新旧视图ID）
+  // 清空实时转写状态
+  liveTranscriptText = '';
+  liveTranscriptSegments = [];
+  // 重新渲染
   let view = document.getElementById('view-recording_review');
   if (view) { renderRecordingReview(view); return; }
   view = document.getElementById('view-recording');
   if (view) renderRecording(view);
+  // 如果有转写文字，自动提示
+  if (transcript) {
+    setTimeout(() => showToast('✅ 文字稿已自动生成（' + transcript.length + '字）'), 500);
+  }
 }
 
 async function playRecording(id) {
@@ -3635,149 +3767,447 @@ function runAIReview(recordingId) {
   const rec = recordings.find(r => r.id === recordingId);
   if (!rec || !rec.transcript) { showToast('请先完成录音转写'); return; }
 
-  const text = rec.transcript;
-  const segments = rec.segments || [];
-
-  // ===== AI分析引擎（基于规则的智能分析）=====
-  const issues = [];
-  const suggestions = [];
-
-  // 1. 检查咨询师发言占比
-  const consultantSegs = segments.filter(s => s.role === '咨询师');
-  const customerSegs = segments.filter(s => s.role === '顾客');
-  const consultantWords = consultantSegs.reduce((sum, s) => sum + s.text.length, 0);
-  const customerWords = customerSegs.reduce((sum, s) => sum + s.text.length, 0);
-  const totalWords = consultantWords + customerWords || 1;
-  const consultantRatio = consultantWords / totalWords;
-
-  if (consultantRatio > 0.75) {
-    issues.push({ type: '话术节奏', desc: '咨询师发言占比过高(' + Math.round(consultantRatio*100) + '%)，缺少顾客互动和倾听', severity: 'medium' });
-    suggestions.push('适当增加开放式提问，引导顾客表达真实需求和顾虑。建议咨询师发言控制在60-70%以内。');
-  } else if (consultantRatio < 0.4) {
-    issues.push({ type: '话术节奏', desc: '咨询师发言占比偏低(' + Math.round(consultantRatio*100) + '%)，可能存在被顾客带节奏的情况', severity: 'medium' });
-    suggestions.push('加强专业输出和项目方案讲解，主动引导谈单方向。');
+  // 检查是否已有AI报告
+  const reviews = Store.get('reviewReports', []);
+  const existing = reviews.find(rv => rv.recordingId === recordingId);
+  if (existing) {
+    showReviewDetail(existing.id);
+    return;
   }
 
-  // 2. 检查顾客异议处理
-  const customerText = customerSegs.map(s => s.text).join(' ');
-  const concernKeywords = ['贵', '便宜', '考虑', '再看看', '怕', '担心', '疼', '痛', '效果', '没效果', '恢复', '假', '不自然', '安全', '风险', '犹豫', '算了'];
-  const foundConcerns = concernKeywords.filter(kw => customerText.includes(kw));
-  if (foundConcerns.length > 0) {
-    const handled = foundConcerns.filter(kw => {
-      const idx = customerText.indexOf(kw);
-      // 检查咨询师是否在后面回应了
-      const afterText = consultantSegs.filter(s => {
-        const segIdx = text.indexOf(s.text);
-        return segIdx > idx;
-      }).map(s => s.text).join(' ');
-      return afterText.length > 0;
-    });
-    if (handled.length < foundConcerns.length) {
-      const unhandled = foundConcerns.filter(k => !handled.includes(k));
-      issues.push({ type: '异议处理', desc: '以下顾客顾虑可能未被充分回应：' + unhandled.join('、'), severity: 'high' });
-      suggestions.push('针对顾客的价格顾虑/效果担忧/安全担心，准备标准化应答话术，不回避问题。');
+  // 检查AI API配置
+  const settings = getAISettings();
+  if (!settings.apiKey) {
+    // 无API Key，提示配置
+    showModal('🤖 AI智能分析', `
+      <div style="line-height:1.8;font-size:14px;color:#333;padding:8px 0;">
+        <p style="margin:8px 0;color:#E91E63;font-weight:600;">⚡ AI智能分析需要配置API密钥</p>
+        <p style="margin:8px 0;font-size:13px;color:#666;">AI将自动分析面诊对话，提取6大结构化信息：</p>
+        <ul style="margin:8px 0;padding-left:20px;font-size:13px;color:#666;line-height:1.8;">
+          <li>① 顾客基础情况（皮肤/衰老/痛点）</li>
+          <li>② 顾客诉求（改善方向/期待效果）</li>
+          <li>③ 异议&顾虑（价格/风险/对比/预算）</li>
+          <li>④ 意向项目（匹配门店品项）</li>
+          <li>⑤ 预算信息（可接受范围/付款方式）</li>
+          <li>⑥ 跟进建议（下一步动作/沟通重点）</li>
+        </ul>
+        <p style="margin:12px 0;font-size:13px;color:#666;">支持 DeepSeek / 通义千问 / OpenAI 等API</p>
+        <div style="background:#FFF5F8;padding:12px;border-radius:8px;margin:12px 0;">
+          <b>📌 推荐使用 DeepSeek API</b><br>
+          <span style="font-size:12px;color:#999;">注册即送500万tokens免费额度，中文理解能力强</span><br>
+          <a href="https://platform.deepseek.com" target="_blank" style="font-size:12px;color:var(--pink);">前往 platform.deepseek.com 注册 →</a>
+        </div>
+      </div>
+    `, [
+      { text: '📋 去设置API', primary: true, onClick: () => { closeModal(); switchView('settings'); setTimeout(() => showAISettingsModal(), 300); } },
+      { text: '使用规则分析', primary: false, onClick: () => runRuleBasedReview(recordingId) }
+    ]);
+    return;
+  }
+
+  // 开始AI分析
+  showModal('🤖 AI分析中', `
+    <div style="text-align:center;padding:20px;">
+      <div style="font-size:36px;margin-bottom:10px;">🤖</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:8px;">正在分析面诊对话...</div>
+      <div style="font-size:13px;color:var(--text-light);">文稿长度：${rec.transcript.length}字</div>
+      <div style="margin-top:12px;font-size:12px;color:var(--pink);">⏳ 预计需要10-30秒，请耐心等待</div>
+    </div>
+  `);
+
+  callAIAPI(rec.transcript).then(result => {
+    if (!result.ok) {
+      closeModal();
+      showToast('❌ AI分析失败: ' + (result.reason || '未知错误'));
+      // 提供降级方案
+      if (result.reason === 'NO_API_KEY') {
+        switchView('settings');
+        setTimeout(() => showAISettingsModal(), 300);
+      } else {
+        showModal('⚠️ AI分析失败', `
+          <div style="line-height:1.8;font-size:14px;color:#333;padding:8px 0;">
+            <p style="color:var(--red);font-weight:600;">错误信息：${result.reason}</p>
+            <p style="margin-top:10px;font-size:13px;color:#666;">您可以使用基于规则的分析作为替代方案</p>
+          </div>
+        `, [
+          { text: '🔧 去设置API', primary: false, onClick: () => { closeModal(); switchView('settings'); setTimeout(() => showAISettingsModal(), 300); } },
+          { text: '📋 使用规则分析', primary: true, onClick: () => { closeModal(); runRuleBasedReview(recordingId); } }
+        ]);
+      }
+      return;
     }
-  }
 
-  // 3. 检查项目方案是否明确
-  const projectKeywords = ['疗程', '方案', '建议', '推荐', '项目', '次', '间隔', '术后', '护理', '防晒'];
-  const hasProjectMentioned = projectKeywords.some(kw => text.includes(kw));
-  if (!hasProjectMentioned) {
-    issues.push({ type: '方案讲解', desc: '未检测到明确的疗程方案讲解，可能只是做了产品介绍', severity: 'high' });
-    suggestions.push('每个谈单必须明确输出"项目名称+疗程次数+间隔时间+预期效果+价格区间"五要素。');
-  }
+    // 保存AI结构化报告
+    const aiData = result.data;
+    const review = {
+      id: 'review_' + Date.now(),
+      recordingId,
+      customerName: rec.customerName || '未知顾客',
+      date: formatDateTime(new Date()),
+      type: 'ai_structured',
+      aiData: aiData,
+      raw: result.raw,
+      summary: aiData.summary || 'AI分析完成',
+      transcript: rec.transcript,
+      // 兼容旧字段
+      issues: [],
+      suggestions: [],
+      totalWords: rec.transcript.length,
+      segCount: (rec.segments || []).length
+    };
+    const reviews2 = Store.get('reviewReports', []);
+    const oldIdx = reviews2.findIndex(r => r.recordingId === recordingId);
+    if (oldIdx >= 0) reviews2[oldIdx] = review; else reviews2.push(review);
+    Store.set('reviewReports', reviews2);
 
-  // 4. 检查价格谈判
-  const priceKeywords = ['钱', '价格', '费用', '优惠', '便宜', '贵', '折扣', '活动'];
-  const hasPriceTalk = priceKeywords.some(kw => text.includes(kw));
-  if (hasPriceTalk) {
-    const bargainingPattern = /(能不能|可以.*便宜|少.*钱|打折|优惠).*/g;
-    const hasBargaining = bargainingPattern.test(customerText);
-    if (hasBargaining) {
-      const priceResponse = consultantSegs.filter(s => s.text.includes('价格') || s.text.includes('优惠') || s.text.includes('价值')).map(s => s.text).join('');
-      if (priceResponse.length < 30) {
-        issues.push({ type: '议价应对', desc: '顾客有议价行为，但咨询师的回应较为简短，可能未充分进行价值锚定', severity: 'medium' });
-        suggestions.push('议价时采用"价值锚定法"：先讲项目价值→再讲专业保障→最后给出福利补偿，而不是直接降价。');
+    // 同步到顾客档案
+    if (rec.customerName) {
+      let customers = Store.get('customers', []);
+      const custIdx = customers.findIndex(c => c.name === rec.customerName);
+      if (custIdx >= 0) {
+        if (!customers[custIdx].reviews) customers[custIdx].reviews = [];
+        customers[custIdx].reviews.push({ reviewId: review.id, date: review.date, summary: review.summary });
+        Store.set('customers', customers);
       }
     }
-  }
 
-  // 5. 检查专业度
-  const professionalTerms = ['屏障', '胶原', '黑素', '血管', '真皮', '表皮', 'SMAS', '代谢', '光热', '靶组织', '交联', '溶解酶'];
-  const usedTerms = professionalTerms.filter(t => text.includes(t));
-  if (usedTerms.length < 2 && consultantWords > 100) {
-    issues.push({ type: '专业度', desc: '专业术语使用较少，可能显得不够专业可信', severity: 'medium' });
-    suggestions.push('适当在讲解中融入专业术语（如"皮肤屏障""胶原重塑""光热作用"等），增强专业权威感。');
-  }
-
-  // 6. 检查成交信号
-  const closingKeywords = ['怎么付', '什么时候做', '约', '现在能', '今天', '定了', '行', '可以'];
-  const hasClosingSignal = closingKeywords.some(kw => customerText.includes(kw));
-  const askedForClose = text.includes('做') && (text.includes('今天') || text.includes('现在') || text.includes('约'));
-  if (hasClosingSignal && !askedForClose) {
-    issues.push({ type: '成交时机', desc: '检测到顾客有购买意向信号，但未发现明确的促进行动', severity: 'high' });
-    suggestions.push('识别成交信号（如"那我试一下""什么时候可以做"）后应立即推动成交，提供明确的行动指引。');
-  }
-
-  // 7. 整体分析
-  const segCount = segments.length;
-  const consultantTurns = consultantSegs.length;
-  const avgResponseLen = consultantSegs.length > 0 ? consultantWords / consultantSegs.length : 0;
-
-  // 生成复盘小结
-  const goodPoints = [];
-  const badPoints = [];
-  if (avgResponseLen > 80) goodPoints.push('咨询师发言内容充实详细');
-  if (segCount > 10) goodPoints.push('沟通回合充足，有深入交流');
-  if (segCount < 5) badPoints.push('沟通回合偏少，可能流于表面');
-  if (usedTerms.length >= 3) goodPoints.push('专业术语运用得当');
-  if (issues.length === 0) goodPoints.push('整体沟通无明显短板');
-
-  issues.forEach(i => badPoints.push(i.desc));
-
-  const summary = `
-【优点】${goodPoints.length > 0 ? goodPoints.join('；') : '暂未发现明显优势点'}
-【待改进】${badPoints.length > 0 ? badPoints.join('；') : '暂未发现明显问题点'}
-【总字数】共${totalWords}字（咨询师${consultantWords}字/顾客${customerWords}字，占比${Math.round(consultantRatio*100)}%/${Math.round((1-consultantRatio)*100)}%）
-【沟通回合】共${segCount}个回合
-【建议】${suggestions.length > 0 ? suggestions.join(' ') : '保持现有沟通节奏，持续优化'}`.trim();
-
-  // 保存复盘报告
-  const review = {
-    id: 'review_' + Date.now(),
-    recordingId, customerName: rec.customerName || '未知顾客',
-    date: formatDateTime(new Date()),
-    issues, suggestions, summary,
-    consultantRatio: Math.round(consultantRatio * 100),
-    totalWords, segCount
-  };
-  const reviews = Store.get('reviewReports', []);
-  // 替换旧报告
-  const oldIdx = reviews.findIndex(r => r.recordingId === recordingId);
-  if (oldIdx >= 0) reviews[oldIdx] = review; else reviews.push(review);
-  Store.set('reviewReports', reviews);
-
-  // 同步到顾客档案
-  if (rec.customerName) {
-    let customers = Store.get('customers', []);
-    const key = rec.customerName + '_' + (rec.customerPhone || 'nophone');
-    let cust = customers.find(c => (c.name + '_' + (c.phone || 'nophone')) === key);
-    if (cust) {
-      if (!cust.reviews) cust.reviews = [];
-      cust.reviews.push({ reviewId: review.id, date: review.date, summary: review.summary.slice(0, 150) });
-      Store.set('customers', customers);
-    }
-  }
-
-  // 显示报告
-  showReviewDetail(review.id);
+    closeModal();
+    showReviewDetail(review.id);
+    showToast('✅ AI分析完成');
+    speak('分析完成');
+  });
 }
 
+// ===== 音频-文字同步播放 =====
+async function playRecordingSync(id) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === id);
+  if (!rec) return;
+  // 如果已在播放，停止
+  if (currentPlaybackAudio) {
+    currentPlaybackAudio.pause();
+    currentPlaybackAudio = null;
+  }
+  if (currentPlaybackHighlightTimer) {
+    clearInterval(currentPlaybackHighlightTimer);
+    currentPlaybackHighlightTimer = null;
+  }
+  const blob = await AudioDB.get(id);
+  if (!blob) { showToast('音频文件丢失'); return; }
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  currentPlaybackAudio = audio;
+  // 如果有带时间戳的分段，打开同步文稿
+  if (rec.segments && rec.segments.length > 0) {
+    viewTranscriptSync(id);
+    audio.ontimeupdate = () => {
+      const cur = audio.currentTime;
+      const segs = document.querySelectorAll('.ts-sync-seg');
+      segs.forEach(el => el.classList.remove('ts-active'));
+      // 找到当前时间对应的文字段
+      let found = false;
+      for (let i = rec.segments.length - 1; i >= 0; i--) {
+        if (cur >= rec.segments[i].timeStart) {
+          const el = document.getElementById('tsSeg_' + i);
+          if (el) {
+            el.classList.add('ts-active');
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            found = true;
+          }
+          break;
+        }
+      }
+    };
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+      currentPlaybackAudio = null;
+      const segs = document.querySelectorAll('.ts-sync-seg');
+      segs.forEach(el => el.classList.remove('ts-active'));
+      const btn = document.getElementById('syncPlayBtn');
+      if (btn) { btn.textContent = '▶ 播放'; }
+    };
+  } else {
+    audio.onended = () => { URL.revokeObjectURL(url); currentPlaybackAudio = null; };
+  }
+  audio.play();
+  showToast('▶ 正在播放...');
+}
+
+// ===== 同步文稿查看 =====
+function viewTranscriptSync(id) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === id);
+  if (!rec || !rec.transcript) { showToast('暂无文稿'); return; }
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">📄 录音文稿（同步播放）</div>
+      <button class="modal-close" onclick="closeModal();stopPlayback()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:12px;">
+      ${rec.customerName ? '👤 '+rec.customerName+' · ' : ''}${rec.date} · ${rec.transcript.length}字
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button class="btn btn-sm btn-primary" id="syncPlayBtn" onclick="togglePlayback('${id}')">⏸ 暂停</button>
+      <button class="btn btn-sm btn-outline" onclick="copyText('${rec.transcript.replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/"/g,'&quot;')}')">📋 复制全文</button>
+    </div>
+    <div id="transcriptSyncContainer" style="background:var(--pink-soft);border-radius:12px;padding:14px;max-height:55vh;overflow-y:auto;line-height:2;font-size:14px;">
+  `;
+  if (rec.segments && rec.segments.length > 0) {
+    rec.segments.forEach((seg, i) => {
+      const mm = String(Math.floor(seg.timeStart/60)).padStart(2,'0');
+      const ss = String(seg.timeStart%60).padStart(2,'0');
+      html += `<span class="ts-sync-seg" id="tsSeg_${i}" data-time="${seg.timeStart}" onclick="seekTo(${seg.timeStart})">
+        <span class="ts-time">[${mm}:${ss}]</span>${seg.text} 
+      </span>`;
+    });
+  } else {
+    html += `<div style="white-space:pre-wrap;color:var(--text);">${rec.transcript}</div>`;
+  }
+  html += `</div>`;
+  html += `<div style="margin-top:12px;display:flex;gap:8px;">
+    <button class="btn btn-outline btn-full btn-sm" onclick="editTranscript('${id}')">✏️ 编辑文稿</button>
+    <button class="btn btn-primary btn-full btn-sm" onclick="closeModal();runAIReview('${id}')">🤖 AI分析</button>
+  </div>`;
+  showModal(html);
+}
+
+function stopPlayback() {
+  if (currentPlaybackAudio) {
+    currentPlaybackAudio.pause();
+    currentPlaybackAudio = null;
+  }
+  if (currentPlaybackHighlightTimer) {
+    clearInterval(currentPlaybackHighlightTimer);
+    currentPlaybackHighlightTimer = null;
+  }
+}
+
+function togglePlayback(id) {
+  if (!currentPlaybackAudio) {
+    playRecordingSync(id);
+    return;
+  }
+  const btn = document.getElementById('syncPlayBtn');
+  if (currentPlaybackAudio.paused) {
+    currentPlaybackAudio.play();
+    if (btn) btn.textContent = '⏸ 暂停';
+  } else {
+    currentPlaybackAudio.pause();
+    if (btn) btn.textContent = '▶ 继续';
+  }
+}
+
+function seekTo(seconds) {
+  if (currentPlaybackAudio) {
+    currentPlaybackAudio.currentTime = seconds;
+  } else {
+    // 如果未在播放，先开始播放
+    const recId = document.querySelector('.ts-sync-seg')?.closest('[id]')?.id;
+    // 直接使用最近的录音ID
+    const recordings = Store.get('recordings', []);
+    const activeSeg = document.querySelector('.ts-sync-seg');
+    if (activeSeg) {
+      // 通过data-time找到录音ID不太直接，简化处理
+    }
+  }
+}
+
+// 编辑文稿
+function editTranscript(id) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === id);
+  if (!rec) return;
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">✏️ 编辑文字稿</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="editTransName" placeholder="顾客姓名" value="${(rec.customerName||'').replace(/"/g,'&quot;')}">
+    <textarea class="input-field" id="editTransText" style="min-height:300px;font-size:13px;line-height:1.8;" placeholder="编辑文字稿...">${(rec.transcript||'').replace(/</g,'&lt;')}</textarea>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">提示：可使用【咨询师】：和【顾客】：标记发言人</div>
+    <button class="btn btn-primary btn-full" onclick="saveEditTranscript('${id}')">💾 保存</button>
+  `;
+  showModal(html);
+}
+
+function saveEditTranscript(id) {
+  const name = document.getElementById('editTransName').value.trim();
+  const text = document.getElementById('editTransText').value.trim();
+  if (!text) { showToast('文稿不能为空'); return; }
+  const recordings = Store.get('recordings', []);
+  const idx = recordings.findIndex(r => r.id === id);
+  if (idx < 0) return;
+  // 重新解析分段
+  const segPattern = /【(咨询师|顾客)】：/g;
+  const segments = [];
+  let lastIdx = 0, match;
+  while ((match = segPattern.exec(text)) !== null) {
+    if (lastIdx > 0 && segments.length > 0) {
+      segments[segments.length-1].text = text.slice(lastIdx, match.index).trim();
+    }
+    segments.push({ role: match[1], text: '' });
+    lastIdx = match.index + match[0].length;
+  }
+  if (segments.length > 0) {
+    segments[segments.length-1].text = text.slice(lastIdx).trim();
+  }
+  recordings[idx].transcript = text;
+  recordings[idx].segments = segments.length > 0 ? segments : recordings[idx].segments || [];
+  recordings[idx].customerName = name;
+  Store.set('recordings', recordings);
+  if (name) autoLinkToCustomerProfile(id, name, recordings[idx].customerPhone || '', text, 'recording');
+  closeModal();
+  showToast('✅ 文稿已更新');
+  const view = document.getElementById('view-recording_review');
+  if (view) renderRecordingReview(view);
+}
+
+// ===== AI API 集成 =====
+const AI_CONFIG = {
+  // 默认使用DeepSeek API（性价比高，支持中文，CORS友好）
+  providers: {
+    deepseek: {
+      name: 'DeepSeek',
+      url: 'https://api.deepseek.com/v1/chat/completions',
+      models: ['deepseek-chat', 'deepseek-reasoner']
+    },
+    qwen: {
+      name: '通义千问',
+      url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      models: ['qwen-turbo', 'qwen-plus', 'qwen-max']
+    },
+    openai: {
+      name: 'OpenAI兼容',
+      url: '',
+      models: ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo']
+    }
+  }
+};
+
+function getAISettings() {
+  return Store.get('aiSettings', {
+    provider: 'deepseek',
+    apiKey: '',
+    model: 'deepseek-chat',
+    customUrl: ''
+  });
+}
+
+function saveAISettings(settings) {
+  Store.set('aiSettings', settings);
+}
+
+// 门店项目列表（用于AI分析匹配）
+const CLINIC_PROJECTS = [
+  '美瑶时光机', '超光子', '舒敏之星', '童颜炮',
+  '肉毒除皱', '清绣', '填充',
+  '水光针', '热玛吉', '超声炮', '光子嫩肤',
+  '玻尿酸', '胶原蛋白', '线雕', '皮秒', '黄金微针'
+];
+
+// 构建AI分析prompt
+function buildAIPrompt(transcript) {
+  return `你是一位资深的医美咨询师AI助手。请分析以下面诊录音转写文本，按JSON格式输出结构化分析结果。
+
+## 面诊对话文本：
+${transcript}
+
+## 门店可选项目列表：
+${CLINIC_PROJECTS.join('、')}
+
+## 输出要求（严格JSON格式，不要输出其他内容）：
+{
+  "customerBasics": {
+    "skinIssues": "顾客的皮肤问题描述（如斑点、毛孔、暗沉等）",
+    "agingIssues": "顾客的衰老问题（如法令纹、松弛、下垂等）",
+    "painPoints": "顾客的核心痛点"
+  },
+  "customerNeeds": {
+    "wantsToImprove": "想改善的具体问题",
+    "expectedResults": "期待的效果"
+  },
+  "objections": [
+    {"type": "价格顾虑", "content": "具体顾虑内容"},
+    {"type": "风险顾虑", "content": "具体顾虑内容"}
+  ],
+  "interestedProjects": ["从门店项目列表中匹配顾客感兴趣的项目"],
+  "budget": {
+    "acceptableBudget": "可接受预算范围",
+    "paymentMethod": "付款方式",
+    "depositInfo": "欠款尾款信息"
+  },
+  "followUpSuggestions": {
+    "nextActions": "后续跟进动作建议",
+    "keyPoints": "下次沟通重点"
+  },
+  "summary": "一句话总结本次面诊"
+}
+
+注意：
+1. 如果对话中未提及某项内容，对应字段填"未提及"
+2. interestedProjects只从门店项目列表中选择
+3. objections数组中只包含顾客实际表达过的顾虑
+4. 请仔细识别医美口语化表达`;
+}
+
+// 调用AI API
+async function callAIAPI(transcript) {
+  const settings = getAISettings();
+  if (!settings.apiKey) {
+    return { ok: false, reason: 'NO_API_KEY' };
+  }
+  const provider = AI_CONFIG.providers[settings.provider] || AI_CONFIG.providers.deepseek;
+  const url = settings.customUrl || provider.url;
+  const model = settings.model || 'deepseek-chat';
+  const prompt = buildAIPrompt(transcript);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${settings.apiKey}`
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          { role: 'system', content: '你是一位专业的医美咨询师AI助手，擅长分析面诊对话并提取关键信息。请严格按照JSON格式输出。' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 2000
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      return { ok: false, reason: `API错误(${res.status}): ${errText.slice(0,200)}` };
+    }
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content || '';
+    // 提取JSON
+    let jsonStr = content;
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) jsonStr = jsonMatch[0];
+    const parsed = JSON.parse(jsonStr);
+    return { ok: true, data: parsed, raw: content };
+  } catch(e) {
+    return { ok: false, reason: e.message };
+  }
+}
+// ===== 复盘报告展示 =====
 function showReviewDetail(reviewId) {
   const reviews = Store.get('reviewReports', []);
   const review = reviews.find(r => r.id === reviewId);
   if (!review) return;
+  if (review.type === 'ai_structured' && review.aiData) {
+    showAIStructuredDetail(review);
+  } else {
+    showRuleBasedDetail(review);
+  }
+}
 
+// 规则分析报告展示（旧版AI复盘样式）
+function showRuleBasedDetail(review) {
   let html = `
     <div class="modal-header">
       <div class="modal-title">🤖 AI复盘报告</div>
@@ -3818,6 +4248,331 @@ function showReviewDetail(reviewId) {
     <button class="btn btn-primary btn-full" style="margin-top:10px;" onclick="closeModal()">✅ 我知道了</button>
   `;
   showModal(html);
+}
+
+// ===== AI结构化报告展示（6大模块）=====
+function showAIStructuredDetail(review) {
+  const d = review.aiData || {};
+  const basics = d.customerBasics || {};
+  const needs = d.customerNeeds || {};
+  const objections = Array.isArray(d.objections) ? d.objections : [];
+  const projects = Array.isArray(d.interestedProjects) ? d.interestedProjects : [];
+  const budget = d.budget || {};
+  const follow = d.followUpSuggestions || {};
+
+  const esc = (s) => (s == null ? '未提及' : String(s).replace(/</g, '&lt;'));
+
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">🤖 AI智能分析报告</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:12px;">
+      👤 ${esc(review.customerName)} · ${review.date} · 基于${review.totalWords}字对话
+    </div>
+  `;
+
+  // ① 顾客基础情况
+  html += `<div class="ai-summary-box"><div style="font-weight:700;font-size:14px;margin-bottom:6px;">① 顾客基础情况</div>
+    <div class="ai-field"><div class="ai-field-label">🟤 皮肤问题</div><div class="ai-field-value">${esc(basics.skinIssues)}</div></div>
+    <div class="ai-field"><div class="ai-field-label">👵 衰老问题</div><div class="ai-field-value">${esc(basics.agingIssues)}</div></div>
+    <div class="ai-field"><div class="ai-field-label">💔 核心痛点</div><div class="ai-field-value">${esc(basics.painPoints)}</div></div>
+  </div>`;
+
+  // ② 顾客诉求
+  html += `<div class="ai-summary-box"><div style="font-weight:700;font-size:14px;margin-bottom:6px;">② 顾客诉求</div>
+    <div class="ai-field"><div class="ai-field-label">✨ 想改善什么</div><div class="ai-field-value">${esc(needs.wantsToImprove)}</div></div>
+    <div class="ai-field"><div class="ai-field-label">🎯 期待效果</div><div class="ai-field-value">${esc(needs.expectedResults)}</div></div>
+  </div>`;
+
+  // ③ 异议&顾虑
+  html += `<div class="ai-summary-box"><div style="font-weight:700;font-size:14px;margin-bottom:6px;">③ 异议 &amp; 顾虑 <span style="font-size:11px;color:var(--text-light);font-weight:400;">${objections.length ? '(' + objections.length + '条)' : ''}</span></div>`;
+  if (objections.length > 0) {
+    objections.forEach(o => {
+      html += `<div class="ai-objection-item"><span class="ai-obj-type">${esc(o.type || '顾虑')}</span><span style="color:var(--text);">${esc(o.content)}</span></div>`;
+    });
+  } else {
+    html += `<div class="ai-field"><div class="ai-field-value" style="color:var(--text-light);">对话中未提及明显异议</div></div>`;
+  }
+  html += `</div>`;
+
+  // ④ 意向项目
+  html += `<div class="ai-summary-box"><div style="font-weight:700;font-size:14px;margin-bottom:6px;">④ 意向项目</div>`;
+  if (projects.length > 0) {
+    html += projects.map(p => `<span class="ai-project-chip">${esc(p)}</span>`).join('');
+  } else {
+    html += `<div class="ai-field"><div class="ai-field-value" style="color:var(--text-light);">未识别到明确意向项目</div></div>`;
+  }
+  html += `</div>`;
+
+  // ⑤ 预算信息
+  html += `<div class="ai-summary-box"><div style="font-weight:700;font-size:14px;margin-bottom:6px;">⑤ 预算信息</div>
+    <div class="ai-field"><div class="ai-field-label">💰 可接受预算</div><div class="ai-field-value">${esc(budget.acceptableBudget)}</div></div>
+    <div class="ai-field"><div class="ai-field-label">💳 付款方式</div><div class="ai-field-value">${esc(budget.paymentMethod)}</div></div>
+    <div class="ai-field"><div class="ai-field-label">🧾 欠款尾款</div><div class="ai-field-value">${esc(budget.depositInfo)}</div></div>
+  </div>`;
+
+  // ⑥ 跟进建议
+  html += `<div class="ai-summary-box"><div style="font-weight:700;font-size:14px;margin-bottom:6px;">⑥ 跟进建议</div>
+    <div class="ai-field"><div class="ai-field-label">📌 后续跟进动作</div><div class="ai-field-value">${esc(follow.nextActions)}</div></div>
+    <div class="ai-field"><div class="ai-field-label">💬 下次沟通重点</div><div class="ai-field-value">${esc(follow.keyPoints)}</div></div>
+  </div>`;
+
+  // 总结 + 操作按钮
+  html += `
+    <div class="ai-summary-box" style="background:#FFF8E1;"><div style="font-weight:700;font-size:14px;margin-bottom:6px;">📋 面诊小结</div>
+      <div class="ai-field-value">${esc(d.summary)}</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
+      <button class="btn btn-outline" style="flex:1;min-width:100px;" onclick="copyAIResult('${review.id}')">📋 复制报告</button>
+      <button class="btn btn-primary" style="flex:1;min-width:140px;" onclick="fillFollowupFromAI('${review.recordingId}')">📝 回填顾客跟进</button>
+    </div>
+    <button class="btn btn-outline btn-full btn-sm" style="margin-top:8px;" onclick="closeModal()">✅ 关闭</button>
+  `;
+  showModal(html);
+}
+
+// 复制AI结构化报告为文本
+function copyAIResult(reviewId) {
+  const reviews = Store.get('reviewReports', []);
+  const review = reviews.find(r => r.id === reviewId);
+  if (!review || !review.aiData) { showToast('未找到AI报告'); return; }
+  const d = review.aiData;
+  const f = (s) => (s == null || s === '' ? '未提及' : s);
+  const lines = [];
+  lines.push('【AI智能分析报告】' + (review.customerName ? ' - ' + review.customerName : ''));
+  lines.push('时间：' + review.date);
+  lines.push('━━━━━━━━━━━━');
+  lines.push('① 顾客基础情况');
+  lines.push('皮肤问题：' + f(d.customerBasics?.skinIssues));
+  lines.push('衰老问题：' + f(d.customerBasics?.agingIssues));
+  lines.push('核心痛点：' + f(d.customerBasics?.painPoints));
+  lines.push('━━━━━━━━━━━━');
+  lines.push('② 顾客诉求');
+  lines.push('想改善：' + f(d.customerNeeds?.wantsToImprove));
+  lines.push('期待效果：' + f(d.customerNeeds?.expectedResults));
+  lines.push('━━━━━━━━━━━━');
+  lines.push('③ 异议&顾虑');
+  if (Array.isArray(d.objections) && d.objections.length > 0) {
+    d.objections.forEach(o => lines.push('· ' + (o.type || '顾虑') + '：' + f(o.content)));
+  } else {
+    lines.push('· 未提及');
+  }
+  lines.push('━━━━━━━━━━━━');
+  lines.push('④ 意向项目：' + ((Array.isArray(d.interestedProjects) && d.interestedProjects.length) ? d.interestedProjects.join('、') : '未提及'));
+  lines.push('━━━━━━━━━━━━');
+  lines.push('⑤ 预算信息');
+  lines.push('可接受预算：' + f(d.budget?.acceptableBudget));
+  lines.push('付款方式：' + f(d.budget?.paymentMethod));
+  lines.push('欠款尾款：' + f(d.budget?.depositInfo));
+  lines.push('━━━━━━━━━━━━');
+  lines.push('⑥ 跟进建议');
+  lines.push('后续动作：' + f(d.followUpSuggestions?.nextActions));
+  lines.push('沟通重点：' + f(d.followUpSuggestions?.keyPoints));
+  lines.push('━━━━━━━━━━━━');
+  lines.push('小结：' + f(d.summary));
+  copyText(lines.join('\n'));
+}
+
+// AI结果回填顾客跟进记录
+function fillFollowupFromAI(recordingId) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === recordingId);
+  const reviews = Store.get('reviewReports', []);
+  const review = reviews.find(rv => rv.recordingId === recordingId && rv.aiData);
+  if (!review) { showToast('未找到AI分析结果'); return; }
+  const d = review.aiData;
+  const f = (s) => (s == null || s === '' ? '未提及' : s);
+  const projects = Array.isArray(d.interestedProjects) ? d.interestedProjects.filter(p => p && p !== '未提及') : [];
+
+  const contentLines = [];
+  contentLines.push('【AI智能分析 - ' + (rec && rec.customerName ? rec.customerName : '面诊顾客') + '】');
+  contentLines.push('📌 顾客基础：皮肤(' + f(d.customerBasics?.skinIssues) + ')，衰老(' + f(d.customerBasics?.agingIssues) + ')，痛点(' + f(d.customerBasics?.painPoints) + ')');
+  contentLines.push('🎯 诉求：想改善(' + f(d.customerNeeds?.wantsToImprove) + ')，期待(' + f(d.customerNeeds?.expectedResults) + ')');
+  if (Array.isArray(d.objections) && d.objections.length > 0) {
+    contentLines.push('⚠️ 异议：' + d.objections.map(o => (o.type || '顾虑') + '(' + f(o.content) + ')').join('；'));
+  }
+  if (projects.length > 0) {
+    contentLines.push('💎 意向项目：' + projects.join('、'));
+  }
+  contentLines.push('💰 预算：可接受(' + f(d.budget?.acceptableBudget) + ')，付款(' + f(d.budget?.paymentMethod) + ')，欠款尾款(' + f(d.budget?.depositInfo) + ')');
+  contentLines.push('📝 跟进：动作(' + f(d.followUpSuggestions?.nextActions) + ')，重点(' + f(d.followUpSuggestions?.keyPoints) + ')');
+  const content = contentLines.join('\n');
+
+  // 已关联顾客 → 直接预填跟进表单；否则 → 预填新增顾客
+  if (rec && rec.customerName) {
+    const customers = Store.get('customers', []);
+    const cust = customers.find(c => c.name === rec.customerName);
+    if (cust) {
+      showAddFollowupPrefilled(cust.id, content, projects);
+      return;
+    }
+  }
+  showAddCustomerPrefilled(rec ? rec.customerName : '', content, projects);
+}
+
+// 预填跟进记录表单（AI内容）
+function showAddFollowupPrefilled(cid, content, projects) {
+  let customers = Store.get('customers', []);
+  customers = migrateCustomers(customers);
+  const c = customers.find(cu => cu.id === cid);
+  if (!c) return;
+
+  const aiProjectHint = (projects && projects.length > 0)
+    ? `<div style="font-size:12px;color:var(--pink);background:var(--pink-soft);border:1px dashed #FFD1DC;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💎 AI识别意向项目：${projects.map(p => '<b>' + p + '</b>').join('、')}<br><span style="color:var(--text-light);">可稍后在顾客档案中新增对应项目</span></div>`
+    : '';
+
+  let projectSelectHtml = '';
+  if (c.projects && c.projects.length > 0) {
+    projectSelectHtml = '<select class="input-field" id="followupProject"><option value="">不关联项目</option>' +
+      c.projects.map(p => `<option value="${p.id}">${p.name}${p.completed ? ' (已完成)' : ''}</option>`).join('') +
+      '</select>';
+  }
+
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">📝 记录跟进 - ${c.name}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">AI分析结果已自动填入，可修改后保存</div>
+    ${projectSelectHtml}
+    ${aiProjectHint}
+    <textarea class="input-field" id="followupContent" rows="7" autofocus style="font-size:13px;line-height:1.7;">${content.replace(/</g, '&lt;')}</textarea>
+    <input class="input-field" type="date" id="followupNextRevisit" placeholder="下次约定回访时间">
+    <button class="btn btn-primary btn-full" onclick="saveFollowup('${cid}')">💾 保存跟进记录</button>
+  `;
+  showModal(html);
+}
+
+// 预填新增顾客表单（AI内容，无档案时）
+function showAddCustomerPrefilled(name, content, projects) {
+  const projectStr = (projects && projects.length > 0) ? projects.join('、') : '';
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">✨ 新建顾客档案并保存AI分析</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">该录音未关联顾客档案，请补充信息后保存（AI分析已自动填入）</div>
+    <input class="input-field" id="custName" placeholder="顾客姓名" value="${(name || '').replace(/"/g, '&quot;')}" autofocus oninput="checkCustName(this.value)">
+    <div id="custNameHint" style="font-size:12px;margin-top:-6px;margin-bottom:8px;display:none;"></div>
+    <input class="input-field" id="custContact" placeholder="联系方式（手机号/微信号）">
+    <input class="input-field" id="custProject" placeholder="铺垫项目（如：热玛吉/水光针）" value="${projectStr.replace(/"/g, '&quot;')}">
+    <textarea class="input-field" id="custThought" placeholder="顾客想法/分析" rows="5" style="font-size:13px;line-height:1.7;">${content.replace(/</g, '&lt;')}</textarea>
+    <input class="input-field" type="date" id="custRevisit" placeholder="约定回访时间">
+    <div class="section-title">跟进优先级</div>
+    <div class="cust-priority-selector">
+      <div class="cust-priority-opt urgent active" data-priority="urgent" onclick="selectPriority(this)">7天紧急回访</div>
+      <div class="cust-priority-opt month" data-priority="month" onclick="selectPriority(this)">1个月内回访</div>
+      <div class="cust-priority-opt long" data-priority="long" onclick="selectPriority(this)">长期慢慢跟进</div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveNewCustomer()">💾 保存并建档</button>
+  `;
+  showModal(html);
+}
+
+// ===== 规则分析降级方案（无API Key时）=====
+function runRuleBasedReview(recordingId) {
+  const recordings = Store.get('recordings', []);
+  const rec = recordings.find(r => r.id === recordingId);
+  if (!rec || !rec.transcript) { showToast('请先完成录音转写'); return; }
+  const text = rec.transcript;
+  const issues = [];
+  const suggestions = [];
+  const hasPrice = /价格|多少钱|贵|预算|优惠|折扣|分期|付款/.test(text);
+  const hasEffect = /效果|改善|变美|紧致|提拉|淡斑|嫩肤|年轻/.test(text);
+  const hasRisk = /风险|副作用|恢复期|疼|痛|会不会|安全|过敏/.test(text);
+  const hasPlan = /回访|下次|联系|跟进|考虑|决定/.test(text);
+
+  if (hasPrice && !hasEffect) {
+    issues.push({ severity: 'high', type: '只谈价格未讲效果', desc: '对话主要围绕价格讨论，未充分讲解项目效果与价值，顾客容易只比价格、不成交，建议补充效果与案例讲解。' });
+  }
+  if (!hasPrice) {
+    issues.push({ severity: 'medium', type: '未触及预算', desc: '对话中未了解顾客预算范围与付款方式，建议后续沟通中主动询问，便于推荐匹配方案。' });
+  }
+  if (!hasRisk) {
+    issues.push({ severity: 'medium', type: '未讲解风险与恢复期', desc: '未向顾客说明项目风险、副作用及恢复期，容易造成成交后退单或差评，建议主动如实告知。' });
+  }
+  if (!hasPlan) {
+    issues.push({ severity: 'medium', type: '缺少跟进规划', desc: '未约定下次联系时间与方式，顾客容易流失，建议在结束前明确回访安排。' });
+  }
+  if (issues.length === 0) {
+    suggestions.push('沟通覆盖较全面，保持效果与风险双向讲解，继续强化信任。');
+  }
+  suggestions.push(hasPrice ? '已了解预算信息，可为其准备对应价位的组合方案。' : '下次沟通重点：了解顾客预算与可接受的付款方式。');
+  suggestions.push('用真实案例照片/视频讲解预期效果，增强顾客信任感。');
+  suggestions.push('约定明确的回访时间并做好到店提醒，跟进意向项目。');
+
+  const review = {
+    id: 'review_' + Date.now(),
+    recordingId,
+    customerName: rec.customerName || '未知顾客',
+    date: formatDateTime(new Date()),
+    type: 'rule_based',
+    issues: issues,
+    suggestions: suggestions,
+    summary: '（基于关键词规则的快速分析）' + text.slice(0, 120) + (text.length > 120 ? '…' : ''),
+    totalWords: text.length,
+    segCount: (rec.segments || []).length
+  };
+  const reviews = Store.get('reviewReports', []);
+  const oldIdx = reviews.findIndex(r => r.recordingId === recordingId);
+  if (oldIdx >= 0) reviews[oldIdx] = review; else reviews.push(review);
+  Store.set('reviewReports', reviews);
+  closeModal();
+  showReviewDetail(review.id);
+  showToast('✅ 规则分析完成');
+}
+
+// ===== AI API 设置弹窗 =====
+function showAISettingsModal() {
+  const s = getAISettings();
+  const providerOptions = Object.keys(AI_CONFIG.providers).map(k =>
+    `<option value="${k}" ${s.provider === k ? 'selected' : ''}>${AI_CONFIG.providers[k].name}</option>`
+  ).join('');
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">🤖 AI智能分析设置</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:4px 0 6px;">API服务商</label>
+    <select class="input-field" id="aiProvider" onchange="updateAIModelOptions()">${providerOptions}</select>
+    <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:12px 0 6px;">模型</label>
+    <select class="input-field" id="aiModel"></select>
+    <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:12px 0 6px;">API Key</label>
+    <input class="input-field" id="aiApiKey" type="password" placeholder="sk-..." value="${(s.apiKey || '').replace(/"/g, '&quot;')}">
+    <label style="font-size:13px;font-weight:600;color:#333;display:block;margin:12px 0 6px;">自定义接口地址（可选）</label>
+    <input class="input-field" id="aiCustomUrl" placeholder="留空使用默认地址" value="${(s.customUrl || '').replace(/"/g, '&quot;')}">
+    <div style="background:#FFF5F8;padding:12px;border-radius:8px;margin:12px 0;">
+      <b style="font-size:13px;">📌 推荐 DeepSeek（注册送免费额度）</b><br>
+      <span style="font-size:12px;color:#999;">中文理解能力强、价格低、支持浏览器直连</span><br>
+      <a href="https://platform.deepseek.com" target="_blank" style="font-size:12px;color:var(--pink);">前往 platform.deepseek.com 注册 →</a>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveAISettingsModal()">💾 保存设置</button>
+  `;
+  showModal(html);
+  updateAIModelOptions();
+}
+
+function updateAIModelOptions() {
+  const sel = document.getElementById('aiModel');
+  if (!sel) return;
+  const provider = document.getElementById('aiProvider').value;
+  const models = (AI_CONFIG.providers[provider] && AI_CONFIG.providers[provider].models) || [];
+  const cur = Store.get('aiSettings', {}).model;
+  sel.innerHTML = models.map(m => `<option value="${m}" ${cur === m ? 'selected' : ''}>${m}</option>`).join('');
+}
+
+function saveAISettingsModal() {
+  const provider = document.getElementById('aiProvider').value;
+  const model = document.getElementById('aiModel').value;
+  const apiKey = document.getElementById('aiApiKey').value.trim();
+  const customUrl = document.getElementById('aiCustomUrl').value.trim();
+  if (!apiKey) { showToast('请填写API Key'); return; }
+  saveAISettings({ provider, model, apiKey, customUrl });
+  closeModal();
+  showToast('✅ AI设置已保存');
+  const view = document.getElementById('view-settings');
+  if (view) renderSettings(view);
 }
 
 // ===== 音色播报设置 =====
