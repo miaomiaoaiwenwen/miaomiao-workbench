@@ -941,6 +941,23 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
 }
 .ts-sync-seg.ts-active .ts-time { color: #E91E63; }
 
+/* ===== 录音中状态动画（明确展示，避免静默录制困惑）===== */
+@keyframes recPulse {
+  0% { box-shadow: 0 0 0 0 rgba(244,67,54,0.5); }
+  70% { box-shadow: 0 0 0 12px rgba(244,67,54,0); }
+  100% { box-shadow: 0 0 0 0 rgba(244,67,54,0); }
+}
+#recIcon.rec-live { animation: recPulse 1.6s ease-out infinite; display: inline-block; border-radius: 50%; }
+#recStatus.rec-live {
+  color: #D32F2F; font-weight: 800;
+  animation: recStatusBlink 1.2s ease-in-out infinite;
+}
+@keyframes recStatusBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+#recStopBtn.rec-live { animation: recPulse 1.6s ease-out infinite; border-radius: 10px; }
+
 /* ===== AI结构化报告 ===== */
 .ai-summary-box {
   background: linear-gradient(135deg, var(--pink-soft) 0%, var(--lavender-light) 100%);
