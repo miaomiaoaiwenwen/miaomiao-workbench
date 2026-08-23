@@ -526,7 +526,7 @@ function renderDaily(view) {
     </div>
     <div class="quick-card" onclick="switchView('consumption')">
       <div class="quick-card-icon qc-gold">💳</div>
-      <div class="quick-card-name">顾客消费</div>
+      <div class="quick-card-name">成交记录</div>
     </div>
     <div class="quick-card" onclick="switchView('recording_review')">
       <div class="quick-card-icon qc-teal">🎙️</div>
@@ -2197,11 +2197,16 @@ function deleteCustomer(cid) {
   renderCustomers(document.getElementById('view-customers'));
 }
 
-// ===== 顾客消费管理视图 =====
+// ===== 顾客消费管理视图（成交记录）=====
 let consumptionSearchKeyword = '';
 let consumptionFilterProject = '';
 let consumptionFilterStatus = '';
 let consumptionShowArchived = false;
+let consumptionFilterMonth = '';
+let consumptionFilterDate = '';
+let consumptionCollapsedMonths = new Set();
+let consumptionCollapsedDates = new Set();
+let consumptionExpandedItems = new Set();
 
 function renderConsumption(view) {
   const records = Store.get('consumption', []);
@@ -2222,35 +2227,44 @@ function renderConsumption(view) {
   if (consumptionFilterStatus) {
     filtered = filtered.filter(r => r.status === consumptionFilterStatus);
   }
+  if (consumptionFilterMonth) {
+    filtered = filtered.filter(r => (r.date || '').startsWith(consumptionFilterMonth));
+  }
+  if (consumptionFilterDate) {
+    filtered = filtered.filter(r => r.date === consumptionFilterDate);
+  }
   if (!consumptionShowArchived) {
     filtered = filtered.filter(r => !r.archived);
   }
 
   // 统计
-  const totalAmount = filtered.filter(r => !r.archived).reduce((s,r) => s + (r.amount||0), 0);
-  const totalRecords = filtered.filter(r => !r.archived).length;
-  const uniqueCustomers = new Set(filtered.filter(r => !r.archived).map(r => r.name)).size;
+  const activeFiltered = filtered.filter(r => !r.archived);
+  const totalAmount = activeFiltered.reduce((s,r) => s + (r.amount||0), 0);
+  const totalRecords = activeFiltered.length;
+  const uniqueCustomers = new Set(activeFiltered.map(r => r.name)).size;
 
   // 获取所有项目名称（用于筛选下拉）
   const allProjects = [...new Set(records.map(r => r.project).filter(Boolean))].sort();
+  // 获取所有月份（用于月份快筛）
+  const allMonths = [...new Set(records.map(r => (r.date || '').substring(0, 7)).filter(Boolean))].sort().reverse();
 
   let html = `
     <div class="consumption-stats">
       <div class="consumption-stat-card">
         <div class="consumption-stat-num">${totalRecords}</div>
-        <div class="consumption-stat-label">消费笔数</div>
+        <div class="consumption-stat-label">成交笔数</div>
       </div>
       <div class="consumption-stat-card">
         <div class="consumption-stat-num">${uniqueCustomers}</div>
-        <div class="consumption-stat-label">消费顾客</div>
+        <div class="consumption-stat-label">成交顾客</div>
       </div>
       <div class="consumption-stat-card">
         <div class="consumption-stat-num">¥${totalAmount.toFixed(0)}</div>
-        <div class="consumption-stat-label">消费总额</div>
+        <div class="consumption-stat-label">成交总额</div>
       </div>
     </div>
     <div class="consumption-search-bar">
-      <input class="consumption-search-input" id="consumptionSearch" placeholder="🔍 搜索顾客姓名/手机号/消费项目..." value="${consumptionSearchKeyword}" oninput="onConsumptionSearch(this.value)">
+      <input class="consumption-search-input" id="consumptionSearch" placeholder="🔍 搜索顾客姓名/手机号/成交项目（跨月汇总）..." value="${consumptionSearchKeyword}" oninput="onConsumptionSearch(this.value)">
     </div>
     <div class="consumption-filter-bar">
       <select class="consumption-filter-select" onchange="onConsumptionFilterProject(this.value)">
@@ -2267,69 +2281,222 @@ function renderConsumption(view) {
         <input type="checkbox" ${consumptionShowArchived?'checked':''} onchange="onConsumptionToggleArchived(this.checked)"> 显示已归档
       </label>
     </div>
+    ${allMonths.length > 0 ? `
+    <div class="cons-month-filter-bar">
+      <button class="cons-month-btn ${!consumptionFilterMonth?'active':''}" onclick="onConsumptionFilterMonth('')">全部</button>
+      ${allMonths.map(m => `<button class="cons-month-btn ${consumptionFilterMonth===m?'active':''}" onclick="onConsumptionFilterMonth('${m}')">${parseInt(m.substring(5))}月</button>`).join('')}
+    </div>` : ''}
+    <div class="cons-date-search-bar">
+      <input type="date" class="consumption-filter-select" value="${consumptionFilterDate}" onchange="onConsumptionFilterDate(this.value)">
+      ${consumptionFilterDate ? `<button class="cons-clear-btn" onclick="onConsumptionFilterDate('')">✕ 清除日期</button>` : ''}
+    </div>
     <button class="btn btn-primary btn-full" onclick="showAddConsumption()" style="margin-bottom:12px;">
-      ➕ 新增消费记录
+      ➕ 新增成交记录
     </button>
   `;
 
-  // 按顾客分组，每个顾客内按时间倒序
-  const byCustomer = {};
-  filtered.forEach(r => {
-    if (!byCustomer[r.name]) byCustomer[r.name] = [];
-    byCustomer[r.name].push(r);
+  // 按月份 → 日期分组
+  const byMonth = {};
+  activeFiltered.forEach(r => {
+    const monthKey = (r.date || '').substring(0, 7) || '未分类';
+    const dateKey = r.date || '未标注日期';
+    if (!byMonth[monthKey]) byMonth[monthKey] = {};
+    if (!byMonth[monthKey][dateKey]) byMonth[monthKey][dateKey] = [];
+    byMonth[monthKey][dateKey].push(r);
   });
 
-  // 每组内按日期倒序
-  Object.keys(byCustomer).forEach(name => {
-    byCustomer[name].sort((a,b) => (b.date||'').localeCompare(a.date||''));
-  });
+  const sortedMonths = Object.keys(byMonth).sort((a, b) => b.localeCompare(a));
 
-  const customerNames = Object.keys(byCustomer).sort();
-  if (customerNames.length === 0) {
-    html += `<div class="empty-state"><div class="es-icon">💳</div><div class="es-text">${keyword ? '没有找到匹配的消费记录' : '还没有消费记录，点击上方按钮添加'}</div></div>`;
+  if (sortedMonths.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">💳</div><div class="es-text">${keyword ? '没有找到匹配的成交记录' : '还没有成交记录，点击上方按钮添加'}</div></div>`;
   } else {
-    html += `<div class="section-title">消费记录 (${customerNames.length} 位顾客)</div>`;
-    customerNames.forEach(name => {
-      const custRecords = byCustomer[name];
-      html += custRecords.map(r => renderConsumptionItem(r)).join('');
+    sortedMonths.forEach(monthKey => {
+      const monthDates = byMonth[monthKey];
+      const monthRecords = Object.values(monthDates).flat();
+      const monthTotal = monthRecords.reduce((s, r) => s + (r.amount || 0), 0);
+      const monthCustomers = new Set(monthRecords.map(r => r.name)).size;
+      const monthLabel = monthKey === '未分类' ? '未分类' : (monthKey.substring(0, 4) + '年' + parseInt(monthKey.substring(5)) + '月');
+      const monthCollapsed = consumptionCollapsedMonths.has(monthKey);
+
+      html += `
+        <div class="cons-month-section${monthCollapsed ? ' collapsed' : ''}">
+          <div class="cons-month-header" onclick="toggleConsMonth('${monthKey}')">
+            <span class="cons-toggle-icon">${monthCollapsed ? '▶' : '▼'}</span>
+            <span class="cons-month-title">${monthLabel}</span>
+            <span class="cons-month-stats">总业绩 ¥${monthTotal.toFixed(0)} ｜ ${monthCustomers}人</span>
+            <button class="cons-export-btn" onclick="event.stopPropagation();exportConsumptionCSV('month','${monthKey}')">📥 导出</button>
+          </div>
+      `;
+
+      if (!monthCollapsed) {
+        const sortedDates = Object.keys(monthDates).sort((a, b) => b.localeCompare(a));
+        sortedDates.forEach(dateKey => {
+          const dateRecords = monthDates[dateKey];
+          const dateTotal = dateRecords.reduce((s, r) => s + (r.amount || 0), 0);
+          const dateLabel = dateKey === '未标注日期' ? '未标注日期' : formatDateCN(dateKey);
+          const dateCollapsed = consumptionCollapsedDates.has(dateKey);
+
+          html += `
+            <div class="cons-date-section${dateCollapsed ? ' collapsed' : ''}">
+              <div class="cons-date-header" onclick="toggleConsDate('${dateKey}')">
+                <span class="cons-toggle-icon">${dateCollapsed ? '▶' : '▼'}</span>
+                <span class="cons-date-title">— ${dateLabel}</span>
+                <span class="cons-date-stats">¥${dateTotal.toFixed(0)} · ${dateRecords.length}人</span>
+                <button class="cons-export-btn" onclick="event.stopPropagation();exportConsumptionCSV('date','${dateKey}')">📥</button>
+              </div>
+          `;
+
+          if (!dateCollapsed) {
+            html += `<div class="cons-date-items">`;
+            dateRecords.forEach((r, idx) => {
+              html += renderConsumptionItem(r, idx + 1);
+            });
+            html += `</div>`;
+          }
+
+          html += `</div>`;
+        });
+      }
+
+      html += `</div>`;
     });
   }
 
   view.innerHTML = html;
 }
 
-function renderConsumptionItem(r) {
+function renderConsumptionItem(r, index) {
   const statusMap = {
-    paid: { label: '已付款未操作', class: 'status-paid' },
-    done: { label: '已做完项目', class: 'status-done' },
-    aftercare: { label: '售后保养阶段', class: 'status-aftercare' }
+    paid: { label: '已付款', class: 'status-paid' },
+    done: { label: '已做完', class: 'status-done' },
+    aftercare: { label: '售后保养', class: 'status-aftercare' }
   };
   const st = statusMap[r.status] || statusMap.paid;
 
-  // 跨表联动：检查是否有跟进记录
+  // 跨表联动：检查跟进记录
   const customers = Store.get('customers', []);
   const hasFollowup = customers.some(c => c.name === r.name);
 
-  return `
-    <div class="consumption-item ${st.class} ${r.archived ? 'archived' : ''}">
-      <div class="consumption-item-header">
-        <div class="consumption-item-name">${r.name}</div>
+  // 关联录音
+  const recordings = Store.get('recordings', []);
+  const custRecordings = recordings.filter(rec => rec.customerName === r.name);
+
+  // 预约提醒：7天内有预约
+  const todayStr = formatDate(new Date());
+  const sevenLater = formatDate(new Date(Date.now() + 7 * 86400000));
+  const hasUpcomingAppt = r.nextAppointment && r.nextAppointment >= todayStr && r.nextAppointment <= sevenLater;
+
+  // 展开/收起状态
+  const itemId = r.id;
+  const isExpanded = consumptionExpandedItems.has(itemId);
+
+  // 简略视图
+  let html = `
+    <div class="consumption-item ${st.class} ${r.archived ? 'archived' : ''} ${hasUpcomingAppt ? 'has-appt' : ''}" id="cons-${itemId}">
+      <div class="consumption-item-header" onclick="toggleConsItem('${itemId}')">
+        <span class="cons-item-index">${index}</span>
+        <div class="consumption-item-name">${r.name}${hasUpcomingAppt ? '<span class="appt-badge">📅 预约</span>' : ''}</div>
         <span class="consumption-item-status ${st.class}">${st.label}</span>
+        <span class="cons-toggle-detail">${isExpanded ? '▲' : '▼'}</span>
       </div>
-      ${r.contact ? `<div class="consumption-item-field"><span class="cif-label">联系方式：</span>${r.contact}</div>` : ''}
-      <div class="consumption-item-field"><span class="cif-label">消费项目：</span>${r.project || '-'}</div>
-      <div class="consumption-item-amount">¥${(r.amount||0).toFixed(2)}</div>
-      <div class="consumption-item-field"><span class="cif-label">成交日期：</span>${r.date || '-'}</div>
-      ${r.notes ? `<div class="consumption-item-field"><span class="cif-label">售后备注：</span>${r.notes}</div>` : ''}
-      ${r.archived ? '<div class="consumption-item-field" style="color:var(--gray);">📦 已归档</div>' : ''}
-      <div class="consumption-item-actions">
-        <button onclick="showEditConsumption('${r.id}')">✏️ 编辑</button>
-        ${hasFollowup ? `<button onclick="jumpToFollowup('${r.name.replace(/'/g, "\\'")}')">👥 查看跟进档案</button>` : ''}
-        ${!r.archived ? `<button class="archive" onclick="archiveConsumption('${r.id}')">📦 归档</button>` : `<button class="archive" onclick="unarchiveConsumption('${r.id}')">📤 取消归档</button>`}
-        <button class="danger" onclick="deleteConsumption('${r.id}')">🗑 删除</button>
+      <div class="consumption-item-summary" onclick="toggleConsItem('${itemId}')">
+        <span class="cons-sum-project">${r.project || '-'}</span>
+        <span class="cons-sum-amount">¥${(r.amount||0).toFixed(0)}</span>
+        ${r.nextAppointment ? `<span class="cons-sum-appt">📅 ${formatDateCN(r.nextAppointment)}</span>` : ''}
+        ${r.paymentMethod ? `<span class="cons-sum-pay">${r.paymentMethod}</span>` : ''}
       </div>
-    </div>
   `;
+
+  // 展开详情
+  if (isExpanded) {
+    html += `<div class="cons-detail-panel">`;
+    // 基础信息
+    html += `<div class="cons-detail-group"><div class="cons-detail-group-title">📋 基础信息</div>`;
+    html += `<div class="cons-detail-row"><span>姓名</span><b>${r.name}</b></div>`;
+    if (r.contact) html += `<div class="cons-detail-row"><span>联系方式</span><b>${r.contact}</b></div>`;
+    if (r.channel) html += `<div class="cons-detail-row"><span>到店渠道</span><b>${r.channel}</b></div>`;
+    html += `</div>`;
+
+    // 成交核心
+    html += `<div class="cons-detail-group"><div class="cons-detail-group-title">💰 成交核心</div>`;
+    html += `<div class="cons-detail-row"><span>成交金额</span><b style="color:var(--pink);font-size:16px;">¥${(r.amount||0).toFixed(2)}</b></div>`;
+    if (r.paymentMethod) html += `<div class="cons-detail-row"><span>付款方式</span><b>${r.paymentMethod}</b></div>`;
+    if (r.cardType) html += `<div class="cons-detail-row"><span>卡种</span><b>${r.cardType}</b></div>`;
+    html += `<div class="cons-detail-row"><span>成交日期</span><b>${r.date || '-'}</b></div>`;
+    html += `<div class="cons-detail-row"><span>状态</span><b>${st.label}</b></div>`;
+    html += `</div>`;
+
+    // 项目明细
+    html += `<div class="cons-detail-group"><div class="cons-detail-group-title">🧴 项目明细</div>`;
+    html += `<div class="cons-detail-row"><span>购买项目</span><b>${r.project || '-'}</b></div>`;
+    if (r.giftProjects) html += `<div class="cons-detail-row"><span>赠送项目</span><b>${r.giftProjects}</b></div>`;
+    if (r.remainingSessions !== undefined && r.remainingSessions !== null) html += `<div class="cons-detail-row"><span>剩余次数</span><b>${r.remainingSessions}</b></div>`;
+    if (r.usageCycle) html += `<div class="cons-detail-row"><span>使用周期</span><b>${r.usageCycle}</b></div>`;
+    html += `</div>`;
+
+    // 跟进记录
+    if (r.skinIssue || r.skincarePlan || r.nextAppointment) {
+      html += `<div class="cons-detail-group"><div class="cons-detail-group-title">📝 跟进记录</div>`;
+      if (r.skinIssue) html += `<div class="cons-detail-row"><span>皮肤问题</span><b>${r.skinIssue}</b></div>`;
+      if (r.skincarePlan) html += `<div class="cons-detail-row"><span>护肤方案</span><b>${r.skincarePlan}</b></div>`;
+      if (r.nextAppointment) html += `<div class="cons-detail-row"><span>下次预约</span><b style="color:${hasUpcomingAppt ? '#F44336' : 'var(--text)'};">${formatDateCN(r.nextAppointment)}${hasUpcomingAppt ? ' ⚠近期' : ''}</b></div>`;
+      html += `</div>`;
+    }
+
+    // 附加数据
+    if (r.balance !== undefined && r.balance !== null && r.balance > 0) {
+      html += `<div class="cons-detail-group"><div class="cons-detail-group-title">📦 附加数据</div>`;
+      html += `<div class="cons-detail-row"><span>剩余充值余额</span><b>¥${r.balance}</b></div>`;
+      if (r.consumedSessions !== undefined && r.consumedSessions !== null) html += `<div class="cons-detail-row"><span>已消费次数</span><b>${r.consumedSessions}</b></div>`;
+      if (r.giftCareStatus) html += `<div class="cons-detail-row"><span>赠送护理状态</span><b>${r.giftCareStatus}</b></div>`;
+      html += `</div>`;
+    }
+
+    // 关联录音
+    if (custRecordings.length > 0) {
+      html += `<div class="cons-detail-group"><div class="cons-detail-group-title">🎙️ 关联录音 (${custRecordings.length})</div>`;
+      custRecordings.forEach(rec => {
+        const dur = rec.duration ? Math.floor(rec.duration/60)+'分'+Math.floor(rec.duration%60)+'秒' : '未知';
+        const hasT = rec.transcript && rec.transcript.length > 0;
+        html += `
+          <div class="cons-recording-item">
+            <div>
+              <div style="font-size:13px;font-weight:600;">${rec.date} · ${dur}</div>
+              <div style="font-size:11px;color:var(--text-light);">${hasT ? '已转写 ' + rec.transcript.length + '字' : '待转写'}</div>
+            </div>
+            <div style="display:flex;gap:4px;">
+              <button class="btn btn-sm btn-outline" onclick="event.stopPropagation();closeModal();switchView('recording_review');setTimeout(()=>playRecordingSync('${rec.id}'),250)">▶ 播放</button>
+              ${hasT ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();closeModal();switchView('recording_review');setTimeout(()=>viewTranscriptSync('${rec.id}'),250)">📄 文稿</button>` : ''}
+            </div>
+          </div>
+        `;
+      });
+      html += `</div>`;
+    }
+
+    // 备注
+    if (r.notes) {
+      html += `<div class="cons-detail-group"><div class="cons-detail-group-title">💬 备注</div><div style="font-size:13px;color:var(--text);padding:4px 0;">${r.notes}</div></div>`;
+    }
+
+    // 操作按钮
+    html += `<div class="consumption-item-actions">`;
+    html += `<button onclick="event.stopPropagation();showEditConsumption('${r.id}')">✏️ 编辑</button>`;
+    if (hasFollowup) html += `<button onclick="event.stopPropagation();jumpToFollowup('${r.name.replace(/'/g, "\\'")}')">👥 跟进档案</button>`;
+    if (custRecordings.length > 0) html += `<button onclick="event.stopPropagation();closeModal();switchView('recording_review')">🎙️ 录音(${custRecordings.length})</button>`;
+    if (!r.archived) {
+      html += `<button class="archive" onclick="event.stopPropagation();archiveConsumption('${r.id}')">📦 归档</button>`;
+    } else {
+      html += `<button class="archive" onclick="event.stopPropagation();unarchiveConsumption('${r.id}')">📤 取消归档</button>`;
+    }
+    html += `<button class="danger" onclick="event.stopPropagation();deleteConsumption('${r.id}')">🗑 删除</button>`;
+    html += `</div>`;
+
+    html += `</div>`; // close cons-detail-panel
+  }
+
+  html += `</div>`; // close consumption-item
+  return html;
 }
 
 function onConsumptionSearch(val) {
@@ -2352,6 +2519,34 @@ function onConsumptionToggleArchived(checked) {
   const view = document.getElementById('view-consumption');
   if (view) renderConsumption(view);
 }
+function onConsumptionFilterMonth(val) {
+  consumptionFilterMonth = val;
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+function onConsumptionFilterDate(val) {
+  consumptionFilterDate = val;
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+function toggleConsMonth(key) {
+  if (consumptionCollapsedMonths.has(key)) consumptionCollapsedMonths.delete(key);
+  else consumptionCollapsedMonths.add(key);
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+function toggleConsDate(key) {
+  if (consumptionCollapsedDates.has(key)) consumptionCollapsedDates.delete(key);
+  else consumptionCollapsedDates.add(key);
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
+function toggleConsItem(itemId) {
+  if (consumptionExpandedItems.has(itemId)) consumptionExpandedItems.delete(itemId);
+  else consumptionExpandedItems.add(itemId);
+  const view = document.getElementById('view-consumption');
+  if (view) renderConsumption(view);
+}
 
 // 跨表联动：从消费跳转到跟进
 function jumpToFollowup(name) {
@@ -2360,13 +2555,12 @@ function jumpToFollowup(name) {
 }
 
 function showAddConsumption() {
-  // 获取已有顾客名用于自动联想提示
   const customers = Store.get('customers', []);
   const custNames = customers.map(c => c.name);
 
   const html = `
     <div class="modal-header">
-      <div class="modal-title">新增消费记录</div>
+      <div class="modal-title">新增成交记录</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <input class="input-field" id="consName" placeholder="顾客姓名" autofocus list="custNameList" oninput="checkConsName(this.value)">
@@ -2375,8 +2569,30 @@ function showAddConsumption() {
     </datalist>
     <div id="consNameHint" style="font-size:12px;margin-top:-6px;margin-bottom:8px;display:none;"></div>
     <input class="input-field" id="consContact" placeholder="联系方式（手机号/微信号）">
-    <input class="input-field" id="consProject" placeholder="消费项目名称（如：双眼皮/胶原水光）">
-    <input class="input-field" type="number" id="consAmount" placeholder="实际消费金额" step="0.01">
+    <select class="input-field" id="consChannel">
+      <option value="">到店渠道（选填）</option>
+      <option value="老客转介绍">老客转介绍</option>
+      <option value="新客到店">新客到店</option>
+      <option value="线上咨询">线上咨询</option>
+    </select>
+    <input class="input-field" id="consProject" placeholder="成交项目（如：轻秀疗程/超光子/童颜炮）">
+    <input class="input-field" type="number" id="consAmount" placeholder="实际成交金额" step="0.01">
+    <div style="display:flex;gap:8px;">
+      <select class="input-field" id="consPaymentMethod" style="flex:1;">
+        <option value="">付款方式</option>
+        <option value="微信">微信</option>
+        <option value="现金">现金</option>
+        <option value="刷卡">刷卡</option>
+        <option value="充值抵扣">充值抵扣</option>
+        <option value="支付宝">支付宝</option>
+      </select>
+      <select class="input-field" id="consCardType" style="flex:1;">
+        <option value="">卡种</option>
+        <option value="疗程卡">疗程卡</option>
+        <option value="单次体验">单次体验</option>
+        <option value="充值金">充值金</option>
+      </select>
+    </div>
     <input class="input-field" type="date" id="consDate" value="${formatDate(new Date())}">
     <div class="section-title">操作完成状态</div>
     <select class="input-field" id="consStatus">
@@ -2384,6 +2600,17 @@ function showAddConsumption() {
       <option value="done">已做完项目</option>
       <option value="aftercare">售后保养阶段</option>
     </select>
+    <input class="input-field" id="consGiftProjects" placeholder="赠送项目（选填，如：胶原水光1次）">
+    <input class="input-field" type="number" id="consRemainingSessions" placeholder="剩余次数（选填）" min="0">
+    <input class="input-field" id="consUsageCycle" placeholder="使用周期规划（选填，如：月底去皱/下周三海润泉）">
+    <input class="input-field" id="consSkinIssue" placeholder="面诊皮肤问题（选填）">
+    <input class="input-field" id="consSkincarePlan" placeholder="定制护肤方案（选填）">
+    <input class="input-field" type="date" id="consNextAppointment" placeholder="下次预约护理时间">
+    <div style="display:flex;gap:8px;">
+      <input class="input-field" type="number" id="consBalance" placeholder="剩余充值余额（选填）" step="0.01" style="flex:1;">
+      <input class="input-field" type="number" id="consConsumedSessions" placeholder="已消费次数（选填）" min="0" style="flex:1;">
+    </div>
+    <input class="input-field" id="consGiftCareStatus" placeholder="赠送护理使用状态（选填）">
     <textarea class="input-field" id="consNotes" placeholder="售后备注（术后反应/复诊约定/顾客反馈等）" rows="2"></textarea>
     <button class="btn btn-primary btn-full" onclick="saveNewConsumption()">保存</button>
   `;
@@ -2410,23 +2637,36 @@ function saveNewConsumption() {
   const name = document.getElementById('consName').value.trim();
   if (!name) { showToast('请输入顾客姓名'); return; }
   const contact = document.getElementById('consContact').value.trim();
+  const channel = document.getElementById('consChannel').value;
   const project = document.getElementById('consProject').value.trim();
   const amount = parseFloat(document.getElementById('consAmount').value);
   if (!amount || amount <= 0) { showToast('请输入有效金额'); return; }
   const date = document.getElementById('consDate').value || formatDate(new Date());
   const status = document.getElementById('consStatus').value;
+  const paymentMethod = document.getElementById('consPaymentMethod').value;
+  const cardType = document.getElementById('consCardType').value;
+  const giftProjects = document.getElementById('consGiftProjects').value.trim();
+  const remainingSessions = document.getElementById('consRemainingSessions').value ? parseInt(document.getElementById('consRemainingSessions').value) : null;
+  const usageCycle = document.getElementById('consUsageCycle').value.trim();
+  const skinIssue = document.getElementById('consSkinIssue').value.trim();
+  const skincarePlan = document.getElementById('consSkincarePlan').value.trim();
+  const nextAppointment = document.getElementById('consNextAppointment').value;
+  const balance = document.getElementById('consBalance').value ? parseFloat(document.getElementById('consBalance').value) : null;
+  const consumedSessions = document.getElementById('consConsumedSessions').value ? parseInt(document.getElementById('consConsumedSessions').value) : null;
+  const giftCareStatus = document.getElementById('consGiftCareStatus').value.trim();
   const notes = document.getElementById('consNotes').value.trim();
 
   const records = Store.get('consumption', []);
   records.push({
     id: 'r' + Date.now(),
-    name, contact, project, amount, date, status, notes,
-    archived: false,
-    createdAt: formatDate(new Date())
+    name, contact, channel, project, amount, date, status,
+    paymentMethod, cardType, giftProjects, remainingSessions, usageCycle,
+    skinIssue, skincarePlan, nextAppointment, balance, consumedSessions, giftCareStatus,
+    notes, archived: false, createdAt: formatDate(new Date())
   });
   Store.set('consumption', records);
   closeModal();
-  speak('已记录消费');
+  speak('已记录成交');
   renderConsumption(document.getElementById('view-consumption'));
 }
 
@@ -2437,13 +2677,35 @@ function showEditConsumption(rid) {
 
   const html = `
     <div class="modal-header">
-      <div class="modal-title">编辑消费记录</div>
+      <div class="modal-title">编辑成交记录</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <input class="input-field" id="editConsName" value="${r.name.replace(/"/g,'&quot;')}" autofocus>
     <input class="input-field" id="editConsContact" value="${(r.contact||'').replace(/"/g,'&quot;')}" placeholder="联系方式">
-    <input class="input-field" id="editConsProject" value="${(r.project||'').replace(/"/g,'&quot;')}" placeholder="消费项目">
+    <select class="input-field" id="editConsChannel">
+      <option value="" ${!r.channel?'selected':''}>到店渠道（选填）</option>
+      <option value="老客转介绍" ${r.channel==='老客转介绍'?'selected':''}>老客转介绍</option>
+      <option value="新客到店" ${r.channel==='新客到店'?'selected':''}>新客到店</option>
+      <option value="线上咨询" ${r.channel==='线上咨询'?'selected':''}>线上咨询</option>
+    </select>
+    <input class="input-field" id="editConsProject" value="${(r.project||'').replace(/"/g,'&quot;')}" placeholder="成交项目">
     <input class="input-field" type="number" id="editConsAmount" value="${r.amount||0}" step="0.01">
+    <div style="display:flex;gap:8px;">
+      <select class="input-field" id="editConsPaymentMethod" style="flex:1;">
+        <option value="" ${!r.paymentMethod?'selected':''}>付款方式</option>
+        <option value="微信" ${r.paymentMethod==='微信'?'selected':''}>微信</option>
+        <option value="现金" ${r.paymentMethod==='现金'?'selected':''}>现金</option>
+        <option value="刷卡" ${r.paymentMethod==='刷卡'?'selected':''}>刷卡</option>
+        <option value="充值抵扣" ${r.paymentMethod==='充值抵扣'?'selected':''}>充值抵扣</option>
+        <option value="支付宝" ${r.paymentMethod==='支付宝'?'selected':''}>支付宝</option>
+      </select>
+      <select class="input-field" id="editConsCardType" style="flex:1;">
+        <option value="" ${!r.cardType?'selected':''}>卡种</option>
+        <option value="疗程卡" ${r.cardType==='疗程卡'?'selected':''}>疗程卡</option>
+        <option value="单次体验" ${r.cardType==='单次体验'?'selected':''}>单次体验</option>
+        <option value="充值金" ${r.cardType==='充值金'?'selected':''}>充值金</option>
+      </select>
+    </div>
     <input class="input-field" type="date" id="editConsDate" value="${r.date||''}">
     <div class="section-title">操作完成状态</div>
     <select class="input-field" id="editConsStatus">
@@ -2451,6 +2713,17 @@ function showEditConsumption(rid) {
       <option value="done" ${r.status==='done'?'selected':''}>已做完项目</option>
       <option value="aftercare" ${r.status==='aftercare'?'selected':''}>售后保养阶段</option>
     </select>
+    <input class="input-field" id="editConsGiftProjects" value="${(r.giftProjects||'').replace(/"/g,'&quot;')}" placeholder="赠送项目">
+    <input class="input-field" type="number" id="editConsRemainingSessions" value="${r.remainingSessions!==null&&r.remainingSessions!==undefined?r.remainingSessions:''}" placeholder="剩余次数" min="0">
+    <input class="input-field" id="editConsUsageCycle" value="${(r.usageCycle||'').replace(/"/g,'&quot;')}" placeholder="使用周期规划">
+    <input class="input-field" id="editConsSkinIssue" value="${(r.skinIssue||'').replace(/"/g,'&quot;')}" placeholder="面诊皮肤问题">
+    <input class="input-field" id="editConsSkincarePlan" value="${(r.skincarePlan||'').replace(/"/g,'&quot;')}" placeholder="定制护肤方案">
+    <input class="input-field" type="date" id="editConsNextAppointment" value="${r.nextAppointment||''}" placeholder="下次预约">
+    <div style="display:flex;gap:8px;">
+      <input class="input-field" type="number" id="editConsBalance" value="${r.balance!==null&&r.balance!==undefined?r.balance:''}" placeholder="剩余充值余额" step="0.01" style="flex:1;">
+      <input class="input-field" type="number" id="editConsConsumedSessions" value="${r.consumedSessions!==null&&r.consumedSessions!==undefined?r.consumedSessions:''}" placeholder="已消费次数" min="0" style="flex:1;">
+    </div>
+    <input class="input-field" id="editConsGiftCareStatus" value="${(r.giftCareStatus||'').replace(/"/g,'&quot;')}" placeholder="赠送护理使用状态">
     <textarea class="input-field" id="editConsNotes" rows="2" placeholder="售后备注">${r.notes||''}</textarea>
     <button class="btn btn-primary btn-full" onclick="saveEditConsumption('${rid}')">保存</button>
   `;
@@ -2461,17 +2734,31 @@ function saveEditConsumption(rid) {
   const name = document.getElementById('editConsName').value.trim();
   if (!name) { showToast('请输入顾客姓名'); return; }
   const contact = document.getElementById('editConsContact').value.trim();
+  const channel = document.getElementById('editConsChannel').value;
   const project = document.getElementById('editConsProject').value.trim();
   const amount = parseFloat(document.getElementById('editConsAmount').value);
   if (!amount || amount <= 0) { showToast('请输入有效金额'); return; }
   const date = document.getElementById('editConsDate').value || formatDate(new Date());
   const status = document.getElementById('editConsStatus').value;
+  const paymentMethod = document.getElementById('editConsPaymentMethod').value;
+  const cardType = document.getElementById('editConsCardType').value;
+  const giftProjects = document.getElementById('editConsGiftProjects').value.trim();
+  const remainingSessions = document.getElementById('editConsRemainingSessions').value ? parseInt(document.getElementById('editConsRemainingSessions').value) : null;
+  const usageCycle = document.getElementById('editConsUsageCycle').value.trim();
+  const skinIssue = document.getElementById('editConsSkinIssue').value.trim();
+  const skincarePlan = document.getElementById('editConsSkincarePlan').value.trim();
+  const nextAppointment = document.getElementById('editConsNextAppointment').value;
+  const balance = document.getElementById('editConsBalance').value ? parseFloat(document.getElementById('editConsBalance').value) : null;
+  const consumedSessions = document.getElementById('editConsConsumedSessions').value ? parseInt(document.getElementById('editConsConsumedSessions').value) : null;
+  const giftCareStatus = document.getElementById('editConsGiftCareStatus').value.trim();
   const notes = document.getElementById('editConsNotes').value.trim();
 
   const records = Store.get('consumption', []);
   const idx = records.findIndex(r => r.id === rid);
   if (idx < 0) return;
-  records[idx] = { ...records[idx], name, contact, project, amount, date, status, notes };
+  records[idx] = { ...records[idx], name, contact, channel, project, amount, date, status,
+    paymentMethod, cardType, giftProjects, remainingSessions, usageCycle,
+    skinIssue, skincarePlan, nextAppointment, balance, consumedSessions, giftCareStatus, notes };
   Store.set('consumption', records);
   closeModal();
   speak('已更新');
@@ -2499,12 +2786,42 @@ function unarchiveConsumption(rid) {
 }
 
 function deleteConsumption(rid) {
-  if (!confirm('确定删除该消费记录吗？')) return;
+  if (!confirm('确定删除该成交记录吗？')) return;
   const records = Store.get('consumption', []);
   const filtered = records.filter(r => r.id !== rid);
   Store.set('consumption', filtered);
   speak('已删除');
   renderConsumption(document.getElementById('view-consumption'));
+}
+
+// 导出成交记录CSV
+function exportConsumptionCSV(scope, key) {
+  const records = Store.get('consumption', []);
+  let filtered = records.filter(r => !r.archived);
+  if (scope === 'month') filtered = filtered.filter(r => (r.date || '').startsWith(key));
+  if (scope === 'date') filtered = filtered.filter(r => r.date === key);
+
+  const headers = ['顾客姓名','联系方式','到店渠道','成交项目','成交金额','付款方式','卡种','成交日期','状态','赠送项目','剩余次数','使用周期','皮肤问题','护肤方案','下次预约','剩余余额','已消费次数','赠送护理状态','备注'];
+  const statusLabels = { paid: '已付款未操作', done: '已做完项目', aftercare: '售后保养阶段' };
+  let csv = '\uFEFF' + headers.join(',') + '\n';
+  filtered.forEach(r => {
+    const row = [r.name, r.contact, r.channel, r.project, r.amount, r.paymentMethod, r.cardType, r.date, statusLabels[r.status]||r.status, r.giftProjects, r.remainingSessions, r.usageCycle, r.skinIssue, r.skincarePlan, r.nextAppointment, r.balance, r.consumedSessions, r.giftCareStatus, r.notes];
+    csv += row.map(cell => {
+      const s = String(cell !== null && cell !== undefined ? cell : '');
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',') + '\n';
+  });
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `成交记录_${scope === 'month' ? key : scope === 'date' ? key : '全部'}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  speak('已导出');
 }
 
 // ===== 设置视图 =====
