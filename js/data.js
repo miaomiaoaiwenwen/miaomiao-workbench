@@ -10,7 +10,7 @@ const MENU_CATEGORIES = [
     children: [
       { id: 'daily', icon: '📋', name: '每日工作' },
       { id: 'customers', icon: '👥', name: '顾客跟进' },
-      { id: 'consumption', icon: '💳', name: '顾客消费' },
+      { id: 'consumption', icon: '💳', name: '成交记录' },
       { id: 'recording_review', icon: '🎙️', name: '录音复盘' },
       { id: 'dashboard', icon: '📊', name: '数据台账' },
     ],
