@@ -761,6 +761,97 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
 }
 .consumption-archive-toggle input { cursor: pointer; }
 
+/* ===== 成交记录 - 月份/日期分组 ===== */
+.cons-month-filter-bar {
+  display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 8px;
+  -webkit-overflow-scrolling: touch;
+}
+.cons-month-btn {
+  flex-shrink: 0; padding: 6px 14px; border-radius: 16px; border: 1.5px solid #E0E0E0;
+  background: var(--white); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: all 0.2s;
+}
+.cons-month-btn.active { background: var(--pink); color: #fff; border-color: var(--pink); }
+.cons-month-btn:active { transform: scale(0.95); }
+
+.cons-date-search-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.cons-clear-btn {
+  padding: 6px 12px; border-radius: 16px; border: 1px solid var(--red);
+  background: #fff; color: var(--red); font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+
+/* 月份板块 */
+.cons-month-section {
+  background: var(--pink-soft); border-radius: var(--radius); padding: 0;
+  margin-bottom: 10px; overflow: hidden;
+}
+.cons-month-header {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: pointer;
+  background: linear-gradient(135deg, var(--pink-light), var(--pink-soft));
+}
+.cons-toggle-icon { font-size: 12px; color: var(--pink); flex-shrink: 0; }
+.cons-month-title { font-size: 16px; font-weight: 800; color: #C2185B; }
+.cons-month-stats { font-size: 12px; color: #E91E63; font-weight: 600; flex: 1; }
+.cons-export-btn {
+  padding: 4px 10px; border-radius: 12px; border: 1px solid var(--pink);
+  background: #fff; color: var(--pink); font-size: 11px; cursor: pointer; flex-shrink: 0;
+}
+
+/* 日期板块 */
+.cons-date-section { margin: 0; }
+.cons-date-header {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px 8px 24px; cursor: pointer;
+}
+.cons-date-title { font-size: 14px; font-weight: 700; color: var(--text); }
+.cons-date-stats { font-size: 12px; color: var(--text-light); flex: 1; }
+.cons-date-items { padding: 0 10px 8px 14px; }
+
+/* 顾客条目 */
+.consumption-item .consumption-item-header { cursor: pointer; }
+.cons-item-index {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%; background: var(--pink-light);
+  color: var(--pink); font-size: 12px; font-weight: 700; flex-shrink: 0;
+}
+.consumption-item-summary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 4px 0 2px; cursor: pointer;
+}
+.cons-sum-project { font-size: 13px; color: var(--text); font-weight: 600; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cons-sum-amount { font-size: 15px; font-weight: 800; color: var(--pink); }
+.cons-sum-appt { font-size: 11px; color: #FF9800; background: #FFF3E0; padding: 2px 8px; border-radius: 10px; }
+.cons-sum-pay { font-size: 11px; color: var(--text-light); background: #F5F5F5; padding: 2px 8px; border-radius: 10px; }
+.cons-toggle-detail { font-size: 12px; color: var(--text-light); flex-shrink: 0; }
+
+/* 预约提醒标记 */
+.appt-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; color: #fff;
+  background: #FF9800; padding: 1px 6px; border-radius: 8px; margin-left: 6px; vertical-align: middle;
+}
+.consumption-item.has-appt { border-left: 3px solid #FF9800 !important; }
+
+/* 展开详情面板 */
+.cons-detail-panel {
+  padding: 10px 0 4px; border-top: 1px solid #F0F0F0; margin-top: 6px;
+}
+.cons-detail-group { margin-bottom: 10px; }
+.cons-detail-group-title {
+  font-size: 12px; font-weight: 700; color: var(--pink); margin-bottom: 4px;
+}
+.cons-detail-row {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  font-size: 13px; padding: 2px 0; gap: 12px;
+}
+.cons-detail-row span { color: var(--text-light); flex-shrink: 0; }
+.cons-detail-row b { color: var(--text); text-align: right; font-weight: 600; word-break: break-word; }
+
+/* 录音条目 */
+.cons-recording-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 10px; background: #FAFAFA; border-radius: 8px; margin-bottom: 4px;
+}
+
 /* 响应式 */
 @media (min-width: 768px) {
   .content { max-width: 500px; margin-left: auto; margin-right: auto; }
