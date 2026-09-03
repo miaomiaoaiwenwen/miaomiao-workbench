@@ -1562,8 +1562,10 @@ function migrateCustomers(customers) {
 }
 
 let custSearchKeyword = '';
+let custSearchTimer = null;
+const CUST_QUICK_TAGS = ['水光', '胶原水光', '超光子', '肌美时光', '菲林普利', '童颜炮', '鼻综合'];
 
-function renderCustomers(view) {
+function getCustCustomersWithMigration() {
   let customers = Store.get('customers', []);
   const migrated = migrateCustomers(customers);
   // 仅当迁移产生变化时才写回（避免每次渲染触发备份/云同步）
@@ -1573,8 +1575,11 @@ function renderCustomers(view) {
     } catch(e) { Store.set('customers', migrated); }
     customers = migrated;
   }
+  return customers;
+}
 
-  // 搜索过滤
+// 只构建列表区 HTML（不含搜索框），供局部刷新使用
+function buildCustListHtml(customers) {
   const keyword = custSearchKeyword.toLowerCase().trim();
 
   // 提取所有有日期的活动条目（项目 + 跟进）
@@ -1660,35 +1665,7 @@ function renderCustomers(view) {
     currentGroup.activities.push(a);
   });
 
-  // 统计
-  const activeCustomers = customers.filter(c => !c.completed);
-  const urgentCount = activeCustomers.filter(c => c.priority === 'urgent').length;
-  const monthCount  = activeCustomers.filter(c => c.priority === 'month').length;
-  const longCount   = activeCustomers.filter(c => c.priority === 'long').length;
-
-  let html = `
-    <div class="cust-search-bar">
-      <input class="cust-search-input" id="custSearch" placeholder="🔍 搜索顾客姓名/项目名称/跟进内容..." value="${custSearchKeyword}" oninput="onCustSearch(this.value)">
-    </div>
-    <div class="cust-stats">
-      <div class="cust-stat-card">
-        <div class="cust-stat-num red">${urgentCount}</div>
-        <div class="cust-stat-label">7天紧急</div>
-      </div>
-      <div class="cust-stat-card">
-        <div class="cust-stat-num yellow">${monthCount}</div>
-        <div class="cust-stat-label">1个月内</div>
-      </div>
-      <div class="cust-stat-card">
-        <div class="cust-stat-num pink">${longCount}</div>
-        <div class="cust-stat-label">长期跟进</div>
-      </div>
-    </div>
-    <button class="btn btn-primary btn-full" onclick="showAddCustomer()" style="margin-bottom:14px;">
-      ➕ 新增顾客跟进
-    </button>
-  `;
-
+  let html = '';
   if (filtered.length === 0) {
     html += `<div class="empty-state"><div class="es-icon">👥</div><div class="es-text">${keyword ? '没有找到匹配的记录' : '还没有跟进记录，点击上方按钮添加'}</div></div>`;
   } else {
@@ -1715,6 +1692,52 @@ function renderCustomers(view) {
       html += `</div>`;
     });
   }
+  return html;
+}
+
+// 局部刷新列表区：不销毁搜索框，保住光标与输入法组合缓冲
+function renderCustListArea() {
+  const area = document.getElementById('custListArea');
+  if (!area) return;
+  const customers = getCustCustomersWithMigration();
+  area.innerHTML = buildCustListHtml(customers);
+}
+
+function renderCustomers(view) {
+  const customers = getCustCustomersWithMigration();
+
+  // 统计（基于全量活跃顾客，与搜索关键词无关，保持静态）
+  const activeCustomers = customers.filter(c => !c.completed);
+  const urgentCount = activeCustomers.filter(c => c.priority === 'urgent').length;
+  const monthCount  = activeCustomers.filter(c => c.priority === 'month').length;
+  const longCount   = activeCustomers.filter(c => c.priority === 'long').length;
+
+  let html = `
+    <div class="cust-search-bar">
+      <input class="cust-search-input" id="custSearch" placeholder="🔍 搜索顾客姓名/项目名称/跟进内容..." value="${custSearchKeyword.replace(/"/g, '&quot;')}" oninput="onCustSearch(this.value)" onkeydown="onCustSearchKey(event)">
+    </div>
+    <div class="cust-quick-tags">
+      ${CUST_QUICK_TAGS.map(t => `<button type="button" class="cust-quick-tag" onclick="quickCustSearch('${t}')">${t}</button>`).join('')}
+    </div>
+    <div class="cust-stats">
+      <div class="cust-stat-card">
+        <div class="cust-stat-num red">${urgentCount}</div>
+        <div class="cust-stat-label">7天紧急</div>
+      </div>
+      <div class="cust-stat-card">
+        <div class="cust-stat-num yellow">${monthCount}</div>
+        <div class="cust-stat-label">1个月内</div>
+      </div>
+      <div class="cust-stat-card">
+        <div class="cust-stat-num pink">${longCount}</div>
+        <div class="cust-stat-label">长期跟进</div>
+      </div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="showAddCustomer()" style="margin-bottom:14px;">
+      ➕ 新增顾客跟进
+    </button>
+    <div id="custListArea">${buildCustListHtml(customers)}</div>
+  `;
 
   view.innerHTML = html;
 }
@@ -1731,10 +1754,31 @@ function formatDateCN(dateStr) {
   return `${y}年${parseInt(m)}月${parseInt(d)}日 · ${['日','一','二','三','四','五','六'][new Date(y, parseInt(m)-1, parseInt(d)).getDay()]}`;
 }
 
+// 防抖搜索：停止输入 400ms 后只刷新列表区（不重建搜索框，输入法可完整拼词上屏）
 function onCustSearch(val) {
   custSearchKeyword = val;
-  const view = document.getElementById('view-customers');
-  if (view) renderCustomers(view);
+  if (custSearchTimer) clearTimeout(custSearchTimer);
+  custSearchTimer = setTimeout(() => {
+    custSearchTimer = null;
+    renderCustListArea();
+  }, 400);
+}
+
+// 回车立即搜索（备用触发方式）
+function onCustSearchKey(e) {
+  if (e && e.key === 'Enter') {
+    if (custSearchTimer) { clearTimeout(custSearchTimer); custSearchTimer = null; }
+    renderCustListArea();
+  }
+}
+
+// 快捷标签：点击填入搜索词并立即检索
+function quickCustSearch(kw) {
+  custSearchKeyword = kw;
+  if (custSearchTimer) { clearTimeout(custSearchTimer); custSearchTimer = null; }
+  const input = document.getElementById('custSearch');
+  if (input) input.value = kw;
+  renderCustListArea();
 }
 
 // 获取顾客所有记录条目（项目+跟进），按时间倒序排列
@@ -2207,11 +2251,9 @@ let consumptionFilterDate = '';
 let consumptionCollapsedMonths = new Set();
 let consumptionCollapsedDates = new Set();
 let consumptionExpandedItems = new Set();
+let consumptionSearchTimer = null;
 
-function renderConsumption(view) {
-  const records = Store.get('consumption', []);
-
-  // 搜索过滤
+function applyConsumptionFilters(records) {
   const keyword = consumptionSearchKeyword.toLowerCase().trim();
   let filtered = records;
   if (keyword) {
@@ -2236,20 +2278,18 @@ function renderConsumption(view) {
   if (!consumptionShowArchived) {
     filtered = filtered.filter(r => !r.archived);
   }
+  return filtered;
+}
 
-  // 统计
+// 统计区 HTML（随搜索/筛选变化，供局部刷新）
+function buildConsStatsHtml() {
+  const records = Store.get('consumption', []);
+  const filtered = applyConsumptionFilters(records);
   const activeFiltered = filtered.filter(r => !r.archived);
   const totalAmount = activeFiltered.reduce((s,r) => s + (r.amount||0), 0);
   const totalRecords = activeFiltered.length;
   const uniqueCustomers = new Set(activeFiltered.map(r => r.name)).size;
-
-  // 获取所有项目名称（用于筛选下拉）
-  const allProjects = [...new Set(records.map(r => r.project).filter(Boolean))].sort();
-  // 获取所有月份（用于月份快筛）
-  const allMonths = [...new Set(records.map(r => (r.date || '').substring(0, 7)).filter(Boolean))].sort().reverse();
-
-  let html = `
-    <div class="consumption-stats">
+  return `
       <div class="consumption-stat-card">
         <div class="consumption-stat-num">${totalRecords}</div>
         <div class="consumption-stat-label">成交笔数</div>
@@ -2262,42 +2302,18 @@ function renderConsumption(view) {
         <div class="consumption-stat-num">¥${totalAmount.toFixed(0)}</div>
         <div class="consumption-stat-label">成交总额</div>
       </div>
-    </div>
-    <div class="consumption-search-bar">
-      <input class="consumption-search-input" id="consumptionSearch" placeholder="🔍 搜索顾客姓名/手机号/成交项目（跨月汇总）..." value="${consumptionSearchKeyword}" oninput="onConsumptionSearch(this.value)">
-    </div>
-    <div class="consumption-filter-bar">
-      <select class="consumption-filter-select" onchange="onConsumptionFilterProject(this.value)">
-        <option value="">所有项目</option>
-        ${allProjects.map(p => `<option value="${p}" ${consumptionFilterProject===p?'selected':''}>${p}</option>`).join('')}
-      </select>
-      <select class="consumption-filter-select" onchange="onConsumptionFilterStatus(this.value)">
-        <option value="">所有状态</option>
-        <option value="paid" ${consumptionFilterStatus==='paid'?'selected':''}>已付款未操作</option>
-        <option value="done" ${consumptionFilterStatus==='done'?'selected':''}>已做完项目</option>
-        <option value="aftercare" ${consumptionFilterStatus==='aftercare'?'selected':''}>售后保养阶段</option>
-      </select>
-      <label class="consumption-archive-toggle">
-        <input type="checkbox" ${consumptionShowArchived?'checked':''} onchange="onConsumptionToggleArchived(this.checked)"> 显示已归档
-      </label>
-    </div>
-    ${allMonths.length > 0 ? `
-    <div class="cons-month-filter-bar">
-      <button class="cons-month-btn ${!consumptionFilterMonth?'active':''}" onclick="onConsumptionFilterMonth('')">全部</button>
-      ${allMonths.map(m => `<button class="cons-month-btn ${consumptionFilterMonth===m?'active':''}" onclick="onConsumptionFilterMonth('${m}')">${parseInt(m.substring(5))}月</button>`).join('')}
-    </div>` : ''}
-    <div class="cons-date-search-bar">
-      <input type="date" class="consumption-filter-select" value="${consumptionFilterDate}" onchange="onConsumptionFilterDate(this.value)">
-      ${consumptionFilterDate ? `<button class="cons-clear-btn" onclick="onConsumptionFilterDate('')">✕ 清除日期</button>` : ''}
-    </div>
-    <button class="btn btn-primary btn-full" onclick="showAddConsumption()" style="margin-bottom:12px;">
-      ➕ 新增成交记录
-    </button>
   `;
+}
+
+// 列表区 HTML（随搜索/筛选变化，供局部刷新）
+function buildConsListHtml() {
+  const records = Store.get('consumption', []);
+  const filtered = applyConsumptionFilters(records);
+  const keyword = consumptionSearchKeyword.toLowerCase().trim();
 
   // 按月份 → 日期分组
   const byMonth = {};
-  activeFiltered.forEach(r => {
+  filtered.forEach(r => {
     const monthKey = (r.date || '').substring(0, 7) || '未分类';
     const dateKey = r.date || '未标注日期';
     if (!byMonth[monthKey]) byMonth[monthKey] = {};
@@ -2307,6 +2323,7 @@ function renderConsumption(view) {
 
   const sortedMonths = Object.keys(byMonth).sort((a, b) => b.localeCompare(a));
 
+  let html = '';
   if (sortedMonths.length === 0) {
     html += `<div class="empty-state"><div class="es-icon">💳</div><div class="es-text">${keyword ? '没有找到匹配的成交记录' : '还没有成交记录，点击上方按钮添加'}</div></div>`;
   } else {
@@ -2361,8 +2378,79 @@ function renderConsumption(view) {
       html += `</div>`;
     });
   }
+  return html;
+}
+
+// 局部刷新统计区 + 列表区：不销毁搜索框，保住光标与输入法组合缓冲
+function refreshConsAreas() {
+  const statsArea = document.getElementById('consStatsArea');
+  if (statsArea) statsArea.innerHTML = buildConsStatsHtml();
+  const listArea = document.getElementById('consListArea');
+  if (listArea) listArea.innerHTML = buildConsListHtml();
+}
+
+function renderConsumption(view) {
+  const records = Store.get('consumption', []);
+
+  // 获取所有项目名称（用于筛选下拉，基于全量记录，不随搜索变化）
+  const allProjects = [...new Set(records.map(r => r.project).filter(Boolean))].sort();
+  // 获取所有月份（用于月份快筛，基于全量记录，不随搜索变化）
+  const allMonths = [...new Set(records.map(r => (r.date || '').substring(0, 7)).filter(Boolean))].sort().reverse();
+
+  let html = `
+    <div class="consumption-stats" id="consStatsArea">${buildConsStatsHtml()}</div>
+    <div class="consumption-search-bar">
+      <input class="consumption-search-input" id="consumptionSearch" placeholder="🔍 搜索顾客姓名/手机号/成交项目（跨月汇总）..." value="${consumptionSearchKeyword.replace(/"/g, '&quot;')}" oninput="onConsumptionSearch(this.value)" onkeydown="onConsumptionSearchKey(event)">
+    </div>
+    <div class="consumption-filter-bar">
+      <select class="consumption-filter-select" onchange="onConsumptionFilterProject(this.value)">
+        <option value="">所有项目</option>
+        ${allProjects.map(p => `<option value="${p}" ${consumptionFilterProject===p?'selected':''}>${p}</option>`).join('')}
+      </select>
+      <select class="consumption-filter-select" onchange="onConsumptionFilterStatus(this.value)">
+        <option value="">所有状态</option>
+        <option value="paid" ${consumptionFilterStatus==='paid'?'selected':''}>已付款未操作</option>
+        <option value="done" ${consumptionFilterStatus==='done'?'selected':''}>已做完项目</option>
+        <option value="aftercare" ${consumptionFilterStatus==='aftercare'?'selected':''}>售后保养阶段</option>
+      </select>
+      <label class="consumption-archive-toggle">
+        <input type="checkbox" ${consumptionShowArchived?'checked':''} onchange="onConsumptionToggleArchived(this.checked)"> 显示已归档
+      </label>
+    </div>
+    ${allMonths.length > 0 ? `
+    <div class="cons-month-filter-bar">
+      <button class="cons-month-btn ${!consumptionFilterMonth?'active':''}" onclick="onConsumptionFilterMonth('')">全部</button>
+      ${allMonths.map(m => `<button class="cons-month-btn ${consumptionFilterMonth===m?'active':''}" onclick="onConsumptionFilterMonth('${m}')">${parseInt(m.substring(5))}月</button>`).join('')}
+    </div>` : ''}
+    <div class="cons-date-search-bar">
+      <input type="date" class="consumption-filter-select" value="${consumptionFilterDate}" onchange="onConsumptionFilterDate(this.value)">
+      ${consumptionFilterDate ? `<button class="cons-clear-btn" onclick="onConsumptionFilterDate('')">✕ 清除日期</button>` : ''}
+    </div>
+    <button class="btn btn-primary btn-full" onclick="showAddConsumption()" style="margin-bottom:12px;">
+      ➕ 新增成交记录
+    </button>
+    <div id="consListArea">${buildConsListHtml()}</div>
+  `;
 
   view.innerHTML = html;
+}
+
+// 防抖搜索：停止输入 400ms 后只刷新统计区+列表区（不重建搜索框）
+function onConsumptionSearch(val) {
+  consumptionSearchKeyword = val;
+  if (consumptionSearchTimer) clearTimeout(consumptionSearchTimer);
+  consumptionSearchTimer = setTimeout(() => {
+    consumptionSearchTimer = null;
+    refreshConsAreas();
+  }, 400);
+}
+
+// 回车立即搜索（备用触发方式）
+function onConsumptionSearchKey(e) {
+  if (e && e.key === 'Enter') {
+    if (consumptionSearchTimer) { clearTimeout(consumptionSearchTimer); consumptionSearchTimer = null; }
+    refreshConsAreas();
+  }
 }
 
 function renderConsumptionItem(r, index) {
@@ -2499,11 +2587,6 @@ function renderConsumptionItem(r, index) {
   return html;
 }
 
-function onConsumptionSearch(val) {
-  consumptionSearchKeyword = val;
-  const view = document.getElementById('view-consumption');
-  if (view) renderConsumption(view);
-}
 function onConsumptionFilterProject(val) {
   consumptionFilterProject = val;
   const view = document.getElementById('view-consumption');
