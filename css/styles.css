@@ -646,6 +646,15 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
 }
 .cust-search-input:focus { border-color: var(--pink); }
 
+/* 搜索快捷标签（高频项目关键词一键填入） */
+.cust-quick-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cust-quick-tag {
+  font-size: 11px; padding: 4px 10px; border-radius: 12px; font-weight: 600;
+  background: rgba(255,107,157,0.10); color: var(--pink);
+  border: 1px solid rgba(255,107,157,0.25); cursor: pointer;
+}
+.cust-quick-tag:active { background: rgba(255,107,157,0.25); }
+
 /* 顾客项目标签 */
 .cust-project-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .cust-project-tag {
