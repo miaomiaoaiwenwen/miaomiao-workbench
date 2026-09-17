@@ -1033,19 +1033,28 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
   overflow: hidden;
 }
 .cs-search-wrap {
-  padding: 10px 12px;
+  padding: 12px;
   border-bottom: 1px solid #F0F0F0;
-  background: #FAFAFA;
-  position: sticky; top: 0;
+  background: linear-gradient(to bottom, #FAFAFA, #FFFFFF);
+  position: sticky; top: 0; z-index: 2;
 }
 .cs-search-input {
-  width: 100%; padding: 8px 12px;
-  border: 1px solid #E0E0E0; border-radius: 8px;
-  font-size: 13px; outline: none;
-  background: #fff;
-  transition: border-color 0.2s;
+  width: 100%; padding: 10px 14px 10px 36px;
+  border: 2px solid var(--pink-soft); border-radius: 10px;
+  font-size: 14px; outline: none;
+  background: #fff url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23FF80AB'%3E%3Cpath d='M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z'/%3E%3C/svg%3E") no-repeat 10px center;
+  background-size: 18px 18px;
+  transition: all 0.2s;
+  font-weight: 500;
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(255, 128, 171, 0.06);
 }
-.cs-search-input:focus { border-color: var(--pink); }
+.cs-search-input::placeholder { color: var(--text-light); font-weight: 400; }
+.cs-search-input:focus {
+  border-color: var(--pink);
+  box-shadow: 0 0 0 3px rgba(255, 128, 171, 0.15);
+  background-color: #fff;
+}
 
 .cs-list {
   flex: 1; overflow-y: auto;
@@ -1120,4 +1129,54 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
   color: var(--pink); font-size: 18px; font-weight: 700;
   opacity: 0; transition: opacity 0.2s;
   flex-shrink: 0;
+}
+
+/* ===== 按钮加载动画 spinner ===== */
+.inline-spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== 进度条模态框 ===== */
+.progress-track {
+  width: 100%; height: 10px;
+  background: #F0F0F0; border-radius: 6px;
+  overflow: hidden; margin: 14px 0;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--pink-soft) 0%, var(--pink) 50%, #FF6E9F 100%);
+  background-size: 200% 100%;
+  border-radius: 6px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  animation: progressShine 1.6s linear infinite;
+  box-shadow: 0 0 8px rgba(255, 128, 171, 0.3);
+}
+@keyframes progressShine {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ===== 触发按钮：未选时加引导 ===== */
+.cs-trigger.unselected {
+  border-style: dashed;
+  border-color: var(--pink-soft);
+  background: linear-gradient(to right, #FFF8FA, #FFF);
+}
+.cs-trigger.unselected .cs-trigger-text {
+  color: var(--pink); font-weight: 500;
+}
+.cs-trigger.unselected::after {
+  content: '🔍 点击搜索';
+  font-size: 11px; color: var(--pink);
+  background: var(--pink-soft);
+  padding: 2px 8px; border-radius: 10px;
+  margin-left: auto; margin-right: 6px;
 }
