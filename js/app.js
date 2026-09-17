@@ -3568,6 +3568,44 @@ document.addEventListener('click', (e) => {
   if (e.target.id === 'modalOverlay') closeModal();
 });
 
+// ===== Confirm 弹窗（基于 showModal 实现） =====
+// 用法：showConfirm('提示信息', '确认按钮文字', () => { ... }, '取消按钮文字'(可选))
+//   取消按钮文字默认 '取消'；用户点遮罩 = 取消
+function showConfirm(message, confirmText, onConfirm, cancelText) {
+  const html = `
+    <div style="text-align:center;font-size:15px;line-height:1.7;color:#333;padding:4px 8px;white-space:pre-wrap;">${message}</div>
+  `;
+  showModal('请确认', html, [
+    { text: cancelText || '取消', onClick: () => {} },
+    { text: confirmText, primary: true, onClick: () => { try { onConfirm && onConfirm(); } catch (e) { console.error('showConfirm onConfirm error:', e); } } }
+  ]);
+}
+
+// ===== 同步进度条模态框（用于大文件上传/转写/AI分析阶段） =====
+// 用法：openProgressModal(title) → setStep(step, '阶段名', percent?) → closeProgress()
+function openProgressModal(title) {
+  const html = `
+    <div style="font-size:14px;color:var(--text-light);line-height:1.6;margin-bottom:14px;text-align:center;">请稍候，系统正在分步处理…</div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progFill" style="width:5%;"></div>
+    </div>
+    <div id="progStep" style="font-size:13px;font-weight:600;color:var(--pink);text-align:center;margin-top:8px;">⏳ 准备中...</div>
+    <div id="progDetail" style="font-size:12px;color:var(--text-light);text-align:center;margin-top:4px;">初始化处理</div>
+  `;
+  showModal(title || '处理中', html, []);
+}
+function setStep(step, label, percent) {
+  const stepEl = document.getElementById('progStep');
+  const detailEl = document.getElementById('progDetail');
+  const fillEl = document.getElementById('progFill');
+  if (stepEl) stepEl.innerHTML = step;
+  if (detailEl) detailEl.textContent = label || '';
+  if (fillEl && typeof percent === 'number') {
+    fillEl.style.width = Math.max(5, Math.min(100, percent)) + '%';
+  }
+}
+function closeProgress() { closeModal(); }
+
 // ===== 录音归档（绑定顾客 + AI 智能分析）=====
 const AudioDB = {
   dbName: 'mm_audio',
@@ -3689,7 +3727,7 @@ function showQuickRecordingModal() {
     </div>
     <div class="section-title" style="font-size:13px;">1️⃣ 选择顾客档案</div>
     <div class="customer-selector" id="quickRecCustomerSelector">
-      <div class="cs-trigger" id="quickRecTrigger" onclick="toggleQuickRecPanel()">
+      <div class="cs-trigger unselected" id="quickRecTrigger" onclick="toggleQuickRecPanel()">
         <span class="cs-trigger-icon">👤</span>
         <span class="cs-trigger-text" id="quickRecTriggerText">— 请选择顾客 —</span>
         <span class="cs-trigger-arrow">▼</span>
@@ -3768,9 +3806,11 @@ function pickQuickRecCustomer(cid) {
   window._quickRecSelectedId = cid;
   // 回显触发按钮
   const text = document.getElementById('quickRecTriggerText');
+  const trigger = document.getElementById('quickRecTrigger');
   if (text) {
     text.innerHTML = `<b>${escapeHtml(c.name)}</b>${c.contact ? ' <span style="color:var(--text-light);font-weight:400;">· ' + escapeHtml(c.contact) + '</span>' : ''}`;
   }
+  if (trigger) trigger.classList.remove('unselected');
   // 关闭面板
   toggleQuickRecPanel(false);
   // 显示痛点备注提示
@@ -3844,27 +3884,241 @@ function escapeHtml(s) {
 async function doQuickRecordingUpload() {
   const cid = window._quickRecSelectedId;
   const file = document.getElementById('quickRecFile').files[0];
-  if (!cid) { showToast('请先选择顾客档案'); toggleQuickRecPanel(true); return; }
+  if (!cid) {
+    showToast('请先选择顾客档案');
+    toggleQuickRecPanel(true);
+    return;
+  }
   if (!file) { showToast('请选择录音文件'); return; }
   // 校验 API Key
   const settings = getAISettings();
   if (!settings.apiKey && !settings.asrApiKey) {
-    showConfirm('⚙️ 录音转写需要先配置 AI Key', '去设置', () => {
+    showConfirm('⚙️ 录音转写需要先配置 AI Key\n（AI 设置 → Whisper 兼容服务）', '去设置', () => {
       closeModal();
       showAISettingsModal();
     });
     return;
   }
+
+  // 按钮先即时反馈禁用（不等模态框关闭）
   const btn = document.getElementById('quickRecUploadBtn');
-  btn.disabled = true;
-  btn.textContent = '⏳ 上传中...';
-  try {
-    await uploadCustomerRecording(cid, file);
-    closeModal();
-  } catch (e) {
-    btn.disabled = false;
-    btn.textContent = '📤 上传并自动复盘';
+  if (btn) {
+    btn.disabled = true;
+    btn.dataset.origText = btn.textContent;
+    btn.innerHTML = '<span class="inline-spinner"></span> 上传中...';
   }
+
+  // 文件大小提示
+  const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+
+  try {
+    // 关闭选档案模态框，开启进度模态框
+    closeModal();
+    await new Promise(r => setTimeout(r, 80)); // 让动画顺滑
+    openProgressModal('🎙️ 录音归档');
+
+    // 阶段 1：上传到 IndexedDB
+    setStep('⏳ 步骤 1/3 · 写入本地存储', `${file.name}（${sizeMB} MB）`, 15);
+    await new Promise(r => setTimeout(r, 80));
+    const uploadResult = await uploadCustomerRecordingWithProgress(cid, file, (percent) => {
+      setStep('⏳ 步骤 1/3 · 写入本地存储', `已读取 ${percent}%`, 15 + percent * 0.25);
+    });
+
+    if (!uploadResult || !uploadResult.success) {
+      throw new Error(uploadResult?.error || '上传失败');
+    }
+
+    // 阶段 2：Whisper 转写
+    setStep('🔄 步骤 2/3 · Whisper 转写中...', 'AI 正在把语音转成文字（可能需要 20-60 秒）', 50);
+    const transcript = await transcribeCustomerRecordingWithProgress(cid, uploadResult.recId, (msg) => {
+      setStep('🔄 步骤 2/3 · Whisper 转写中...', msg, 55);
+    });
+    if (!transcript) {
+      throw new Error('转写失败，请检查 AI Key 与网络');
+    }
+
+    // 阶段 3：AI 智能分析
+    setStep('🤖 步骤 3/3 · AI 智能分析中...', '正在提取面部痛点/在意项目/到店意向', 80);
+    const analysis = await analyzeCustomerRecordingWithProgress(cid, uploadResult.recId, (msg) => {
+      setStep('🤖 步骤 3/3 · AI 智能分析中...', msg, 85);
+    });
+
+    // 完成
+    setStep('✅ 完成', `已写入「${getCustomerNameById(cid)}」档案`, 100);
+    await new Promise(r => setTimeout(r, 800));
+    closeProgress();
+
+    // 回到顾客详情页
+    setTimeout(() => {
+      showToast('✅ 录音归档完成，已写入顾客档案');
+      switchView('customers');
+      setTimeout(() => showCustomerDetail(cid), 300);
+    }, 100);
+  } catch (e) {
+    console.error('录音归档流程失败', e);
+    // 关闭进度框，按钮恢复
+    closeProgress();
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = btn.dataset.origText || '📤 上传并自动复盘';
+    }
+    showConfirm(
+      '❌ 录音归档失败\n\n' + (e.message || '未知错误') + '\n\n请检查：\n1. AI Key 是否已配置\n2. 网络是否可访问 API\n3. 录音文件是否完整',
+      '🔄 重试', () => {
+        // 重试 = 重新弹出模态框
+        showQuickRecordingModal();
+        // 自动恢复选中态
+        if (cid) {
+          window._quickRecSelectedId = cid;
+          pickQuickRecCustomer(cid);
+        }
+      },
+      '关闭'
+    );
+  }
+}
+
+// 包装 uploadCustomerRecording 返回 {success, recId, error}
+async function uploadCustomerRecordingWithProgress(customerId, file, onProgress) {
+  try {
+    if (!/^audio\//.test(file.type) && !/\.(m4a|mp3|wav|mp4|aac|ogg|webm)$/i.test(file.name)) {
+      return { success: false, error: '请上传音频文件（m4a/mp3/wav）' };
+    }
+    const id = 'r' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    const rec = {
+      id, customerId,
+      fileName: file.name,
+      mimeType: file.type || 'audio/m4a',
+      size: file.size,
+      blob: file,
+      createdAt: Date.now(),
+      transcript: '',
+      analysis: null
+    };
+    // 模拟读取进度（FileReader.readAsArrayBuffer 不会真的分片回调，这里给个渐进动画）
+    let simulated = 0;
+    const timer = setInterval(() => {
+      simulated = Math.min(simulated + 12, 92);
+      onProgress && onProgress(simulated);
+    }, 150);
+    await AudioDB.save(rec);
+    clearInterval(timer);
+    onProgress && onProgress(100);
+    return { success: true, recId: id };
+  } catch (e) {
+    return { success: false, error: e.message || 'IndexedDB 写入失败' };
+  }
+}
+
+// 包装转写：等待 transcript 字段被填入
+async function transcribeCustomerRecordingWithProgress(customerId, recId, onMsg) {
+  onMsg && onMsg('发送录音到 Whisper 服务...');
+  // 直接调原函数（它内部是 fire-and-forget 的，我们要改成等结果）
+  const rec = await AudioDB.get(recId);
+  if (!rec) return null;
+  const settings = getAISettings();
+  const asrKey = settings.asrApiKey || settings.apiKey;
+  const asrBase = settings.asrBaseUrl || settings.baseUrl || 'https://api.openai.com/v1';
+  const asrModel = settings.asrModel || 'whisper-1';
+  const prompt = (typeof ASR_PROMPT_PREFIX !== 'undefined' ? ASR_PROMPT_PREFIX : '');
+
+  const formData = new FormData();
+  formData.append('file', rec.blob, rec.fileName || 'recording.m4a');
+  formData.append('model', asrModel);
+  formData.append('language', 'zh');
+  formData.append('response_format', 'verbose_json');
+  if (prompt) formData.append('prompt', prompt);
+
+  onMsg && onMsg('等待 Whisper 识别结果...');
+  try {
+    const resp = await fetch(asrBase.replace(/\/$/, '') + '/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + asrKey },
+      body: formData
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      throw new Error('ASR HTTP ' + resp.status + '：' + (txt || resp.statusText));
+    }
+    const data = await resp.json();
+    const text = data.text || '';
+    rec.transcript = text;
+    rec.transcribedAt = Date.now();
+    await AudioDB.save(rec);
+    return text;
+  } catch (e) {
+    console.error('Whisper error:', e);
+    throw new Error('Whisper 转写失败：' + e.message);
+  }
+}
+
+// 包装 AI 分析
+async function analyzeCustomerRecordingWithProgress(customerId, recId, onMsg) {
+  const rec = await AudioDB.get(recId);
+  if (!rec || !rec.transcript) return null;
+  onMsg && onMsg('调用 AI 分析面诊对话...');
+  try {
+    const result = await callAIAPI(rec.transcript);
+    if (!result.ok) {
+      throw new Error(result.reason || 'AI 分析失败');
+    }
+    const analysis = result.data;
+    rec.analysis = analysis;
+    rec.analyzedAt = Date.now();
+    await AudioDB.save(rec);
+
+    // 自动同步痛点到顾客档案
+    if (customerId && analysis) {
+      syncAnalysisToCustomer(customerId, rec, analysis);
+    }
+    return analysis;
+  } catch (e) {
+    console.error('AI 分析 error:', e);
+    throw new Error('AI 分析失败：' + e.message);
+  }
+}
+
+// 把 AI 分析结果同步到顾客的 consultNotes / casualNotes
+function syncAnalysisToCustomer(customerId, rec, analysis) {
+  const customers = Store.get('customers', []);
+  const idx = customers.findIndex(c => c.id === customerId);
+  if (idx < 0) return;
+  const c = customers[idx];
+  const date = formatDate(new Date(rec.createdAt || Date.now()));
+
+  // 收集要点
+  const parts = [];
+  if (analysis.customerBasics) {
+    const cb = analysis.customerBasics;
+    if (cb.skinIssues && cb.skinIssues !== '未提及') parts.push('【皮肤】' + cb.skinIssues);
+    if (cb.agingIssues && cb.agingIssues !== '未提及') parts.push('【衰老】' + cb.agingIssues);
+    if (cb.painPoints) parts.push('【核心痛点】' + cb.painPoints);
+  }
+  if (analysis.interestedProjects && analysis.interestedProjects.length > 0) {
+    parts.push('【在意的项目】' + analysis.interestedProjects.join('、'));
+  }
+  if (analysis.budget && analysis.budget.acceptableBudget && analysis.budget.acceptableBudget !== '未提及') {
+    parts.push('【预算】' + analysis.budget.acceptableBudget);
+  }
+  if (analysis.followUpSuggestions && analysis.followUpSuggestions.nextActions) {
+    parts.push('【下次跟进】' + (Array.isArray(analysis.followUpSuggestions.nextActions) ? analysis.followUpSuggestions.nextActions.join('；') : analysis.followUpSuggestions.nextActions));
+  }
+  if (analysis.summary) parts.push('【AI总结】' + analysis.summary);
+
+  if (parts.length === 0) return;
+  const block = `\n[${date} AI提取] ${parts.join('\n')}`;
+
+  // 追加到 consultNotes（不覆盖原内容）
+  if (!c.consultNotes) c.consultNotes = '';
+  c.consultNotes = c.consultNotes + block;
+
+  Store.set('customers', customers);
+}
+
+// 根据 id 取顾客名（用于完成提示）
+function getCustomerNameById(cid) {
+  const c = (Store.get('customers', []) || []).find(x => x.id === cid);
+  return c ? c.name : '该顾客';
 }
 
 // 转写单条录音
