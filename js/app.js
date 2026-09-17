@@ -3677,6 +3677,8 @@ function showQuickRecordingModal() {
   const customers = (Store.get('customers', []) || [])
     .filter(c => !c.completed)
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh-CN'));
+  window._quickRecCustomers = customers;
+  window._quickRecSelectedId = '';
   const html = `
     <div class="modal-header">
       <div class="modal-title">🎙️ 录音归档（首页入口）</div>
@@ -3686,11 +3688,23 @@ function showQuickRecordingModal() {
       💡 上传录音后将自动转写→AI复盘→关键痛点自动写入顾客「面诊痛点备注」字段
     </div>
     <div class="section-title" style="font-size:13px;">1️⃣ 选择顾客档案</div>
-    <select class="input-field" id="quickRecCustomerId">
-      <option value="">— 请选择顾客 —</option>
-      ${customers.map(c => `<option value="${c.id}">${c.name}${c.contact ? ' · ' + c.contact : ''}</option>`).join('')}
-    </select>
-    <div id="quickRecCustomerHint" style="font-size:12px;color:var(--text-light);margin:-6px 0 12px 0;display:none;"></div>
+    <div class="customer-selector" id="quickRecCustomerSelector">
+      <div class="cs-trigger" id="quickRecTrigger" onclick="toggleQuickRecPanel()">
+        <span class="cs-trigger-icon">👤</span>
+        <span class="cs-trigger-text" id="quickRecTriggerText">— 请选择顾客 —</span>
+        <span class="cs-trigger-arrow">▼</span>
+      </div>
+      <div class="cs-panel" id="quickRecPanel" style="display:none;">
+        <div class="cs-search-wrap">
+          <input class="cs-search-input" id="quickRecSearch" type="text" placeholder="🔍 输入姓名/手机号快速检索" oninput="filterQuickRecList(this.value)">
+        </div>
+        <div class="cs-list" id="quickRecList">
+          ${renderQuickRecList(customers)}
+        </div>
+        <div class="cs-empty" id="quickRecEmpty" style="display:none;">未找到匹配的顾客</div>
+      </div>
+    </div>
+    <div id="quickRecCustomerHint" style="font-size:12px;color:var(--text-light);margin:8px 0 12px 0;display:none;"></div>
     <div class="section-title" style="font-size:13px;">2️⃣ 选择录音文件</div>
     <input type="file" id="quickRecFile" accept="audio/*,.m4a,.mp3,.wav,.mp4,.aac" style="margin-bottom:12px;">
     <div id="quickRecFileInfo" style="font-size:12px;color:var(--text-light);display:none;margin-bottom:12px;"></div>
@@ -3714,27 +3728,123 @@ function showQuickRecordingModal() {
         }
       };
     }
-    const sel = document.getElementById('quickRecCustomerId');
-    if (sel) {
-      sel.onchange = function() {
-        const hint = document.getElementById('quickRecCustomerHint');
-        const c = customers.find(x => x.id === this.value);
-        if (c && c.consultNotes) {
-          hint.style.display = 'block';
-          const snippet = c.consultNotes.length > 80 ? c.consultNotes.slice(0, 80) + '...' : c.consultNotes;
-          hint.innerHTML = `📝 已有痛点备注：<span style="color:var(--text-light);">${snippet}</span>`;
-        } else {
-          hint.style.display = 'none';
-        }
-      };
-    }
+    // 外部点击关闭面板
+    setTimeout(() => {
+      document.addEventListener('click', onClickOutsideQuickRecPanel, true);
+    }, 100);
   }, 50);
 }
 
+// 顾客列表项 HTML 生成
+function renderQuickRecList(customers) {
+  if (!customers || customers.length === 0) {
+    return '<div class="cs-list-empty">暂无未完成顾客</div>';
+  }
+  return customers.map(c => {
+    const initials = (c.name || '?').slice(0, 1).toUpperCase();
+    const priorityClass = c.priority === 'urgent' ? 'cs-prio-urgent' : (c.priority === 'month' ? 'cs-prio-month' : 'cs-prio-long');
+    const priorityText = c.priority === 'urgent' ? '🔴7天' : (c.priority === 'month' ? '🟡1月' : '🩷长期');
+    const lastFollowup = c.entries && c.entries.length > 0 ? c.entries[c.entries.length - 1].date : (c.revisitDate || '');
+    return `
+      <div class="cs-item" data-cid="${c.id}" onclick="pickQuickRecCustomer('${c.id}')">
+        <div class="cs-avatar ${priorityClass}">${initials}</div>
+        <div class="cs-info">
+          <div class="cs-name">${escapeHtml(c.name)}${c.contact ? ' <span class="cs-contact">' + escapeHtml(c.contact) + '</span>' : ''}</div>
+          <div class="cs-meta">
+            <span class="cs-prio-tag ${priorityClass}">${priorityText}</span>
+            ${lastFollowup ? '<span class="cs-date">' + escapeHtml(lastFollowup) + '</span>' : ''}
+            ${c.consultNotes ? '<span class="cs-tag-note">有痛点备注</span>' : ''}
+          </div>
+        </div>
+        <span class="cs-check">✓</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function pickQuickRecCustomer(cid) {
+  const c = (window._quickRecCustomers || []).find(x => x.id === cid);
+  if (!c) return;
+  window._quickRecSelectedId = cid;
+  // 回显触发按钮
+  const text = document.getElementById('quickRecTriggerText');
+  if (text) {
+    text.innerHTML = `<b>${escapeHtml(c.name)}</b>${c.contact ? ' <span style="color:var(--text-light);font-weight:400;">· ' + escapeHtml(c.contact) + '</span>' : ''}`;
+  }
+  // 关闭面板
+  toggleQuickRecPanel(false);
+  // 显示痛点备注提示
+  const hint = document.getElementById('quickRecCustomerHint');
+  if (hint) {
+    if (c.consultNotes) {
+      hint.style.display = 'block';
+      const snippet = c.consultNotes.length > 80 ? c.consultNotes.slice(0, 80) + '...' : c.consultNotes;
+      hint.innerHTML = `📝 已有痛点备注：<span style="color:var(--text-light);">${escapeHtml(snippet)}</span>`;
+    } else {
+      hint.style.display = 'none';
+    }
+  }
+  // 标记选中
+  document.querySelectorAll('.cs-item').forEach(el => {
+    el.classList.toggle('cs-item-selected', el.dataset.cid === cid);
+  });
+}
+
+function toggleQuickRecPanel(force) {
+  const panel = document.getElementById('quickRecPanel');
+  const wrap = document.getElementById('quickRecCustomerSelector');
+  if (!panel) return;
+  const show = typeof force === 'boolean' ? force : (panel.style.display === 'none');
+  panel.style.display = show ? 'block' : 'none';
+  if (wrap) wrap.classList.toggle('cs-open', show);
+  if (show) {
+    const search = document.getElementById('quickRecSearch');
+    if (search) {
+      search.value = '';
+      filterQuickRecList('');
+      setTimeout(() => search.focus(), 50);
+    }
+  }
+}
+
+function filterQuickRecList(keyword) {
+  const list = document.getElementById('quickRecList');
+  const empty = document.getElementById('quickRecEmpty');
+  if (!list) return;
+  const kw = (keyword || '').trim().toLowerCase();
+  const all = window._quickRecCustomers || [];
+  const matched = !kw
+    ? all
+    : all.filter(c =>
+        (c.name || '').toLowerCase().includes(kw) ||
+        (c.contact || '').toLowerCase().includes(kw) ||
+        ((c.projects || []).some(p => (p.name || '').toLowerCase().includes(kw)))
+      );
+  list.innerHTML = renderQuickRecList(matched);
+  if (empty) empty.style.display = matched.length === 0 ? 'block' : 'none';
+}
+
+function onClickOutsideQuickRecPanel(e) {
+  const wrap = document.getElementById('quickRecCustomerSelector');
+  if (!wrap) return;
+  if (!wrap.contains(e.target)) {
+    const panel = document.getElementById('quickRecPanel');
+    if (panel && panel.style.display !== 'none') toggleQuickRecPanel(false);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 async function doQuickRecordingUpload() {
-  const cid = document.getElementById('quickRecCustomerId').value;
+  const cid = window._quickRecSelectedId;
   const file = document.getElementById('quickRecFile').files[0];
-  if (!cid) { showToast('请先选择顾客档案'); return; }
+  if (!cid) { showToast('请先选择顾客档案'); toggleQuickRecPanel(true); return; }
   if (!file) { showToast('请选择录音文件'); return; }
   // 校验 API Key
   const settings = getAISettings();
