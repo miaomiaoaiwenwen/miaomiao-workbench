@@ -980,3 +980,144 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
   background: #fff; border: 1px solid #FFD1DC;
   padding: 3px 10px; border-radius: 20px; margin: 0 6px 6px 0;
 }
+
+/* ===== 顾客搜索式下拉选择器 ===== */
+.customer-selector {
+  position: relative;
+  width: 100%;
+  margin-bottom: 12px;
+}
+.cs-trigger {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1.5px solid #E0E0E0;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-height: 44px;
+}
+.cs-trigger:hover { border-color: var(--pink); }
+.cs-trigger-icon {
+  width: 26px; height: 26px; border-radius: 50%;
+  background: var(--lavender-light); color: var(--lavender);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; flex-shrink: 0;
+}
+.cs-trigger-text {
+  flex: 1; font-size: 14px; color: var(--text);
+  font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-trigger-arrow {
+  color: var(--text-light); font-size: 10px;
+  transition: transform 0.2s;
+}
+.customer-selector.cs-open .cs-trigger {
+  border-color: var(--pink);
+  box-shadow: 0 0 0 3px rgba(255, 107, 139, 0.12);
+}
+.customer-selector.cs-open .cs-trigger-arrow {
+  transform: rotate(180deg);
+}
+
+.cs-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+  background: #fff;
+  border: 1px solid #E0E0E0;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
+  z-index: 100;
+  max-height: 320px;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.cs-search-wrap {
+  padding: 10px 12px;
+  border-bottom: 1px solid #F0F0F0;
+  background: #FAFAFA;
+  position: sticky; top: 0;
+}
+.cs-search-input {
+  width: 100%; padding: 8px 12px;
+  border: 1px solid #E0E0E0; border-radius: 8px;
+  font-size: 13px; outline: none;
+  background: #fff;
+  transition: border-color 0.2s;
+}
+.cs-search-input:focus { border-color: var(--pink); }
+
+.cs-list {
+  flex: 1; overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  max-height: 260px;
+}
+.cs-list-empty {
+  padding: 30px 12px; text-align: center;
+  color: var(--text-light); font-size: 13px;
+}
+.cs-empty {
+  padding: 30px 12px; text-align: center;
+  color: var(--text-light); font-size: 13px;
+  border-top: 1px dashed #F0F0F0;
+}
+
+.cs-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #F8F8F8;
+  transition: background 0.15s;
+  user-select: none;
+}
+.cs-item:last-child { border-bottom: none; }
+.cs-item:hover { background: var(--pink-soft); }
+.cs-item:active { background: #FFE0EC; }
+.cs-item-selected { background: #FFE0EC; }
+.cs-item-selected .cs-check { opacity: 1; }
+
+.cs-avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700; color: #fff;
+  flex-shrink: 0;
+}
+.cs-avatar.cs-prio-urgent { background: linear-gradient(135deg, #EF5350, #E53935); }
+.cs-avatar.cs-prio-month { background: linear-gradient(135deg, #FFCA28, #FFB300); }
+.cs-avatar.cs-prio-long { background: linear-gradient(135deg, #F48FB1, #EC407A); }
+
+.cs-info { flex: 1; min-width: 0; overflow: hidden; }
+.cs-name {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  display: flex; align-items: center; gap: 6px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-contact {
+  font-size: 12px; font-weight: 400; color: var(--text-light);
+}
+.cs-meta {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 3px;
+  font-size: 11px; color: var(--text-light);
+  flex-wrap: wrap;
+}
+.cs-prio-tag {
+  padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 600;
+}
+.cs-prio-tag.cs-prio-urgent { background: #FFEBEE; color: #C62828; }
+.cs-prio-tag.cs-prio-month { background: #FFF8E1; color: #E65100; }
+.cs-prio-tag.cs-prio-long { background: #FCE4EC; color: #AD1457; }
+.cs-tag-note {
+  background: var(--lavender-light); color: var(--lavender);
+  padding: 1px 6px; border-radius: 4px;
+  font-weight: 600;
+}
+.cs-date { font-size: 11px; color: var(--text-light); }
+
+.cs-check {
+  color: var(--pink); font-size: 18px; font-weight: 700;
+  opacity: 0; transition: opacity 0.2s;
+  flex-shrink: 0;
+}
