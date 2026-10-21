@@ -1180,3 +1180,33 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
   padding: 2px 8px; border-radius: 10px;
   margin-left: auto; margin-right: 6px;
 }
+
+/* ==================== 首屏骨架屏（仅启动阶段显示，渲染后被移除） ==================== */
+/* 目的：JS 加载/解析期间避免内容区纯白或纯黑，降低"黑屏卡顿"的感知 */
+.skeleton-boot {
+  padding: 4px 0;
+  animation: skFadeIn 0.2s ease;
+}
+.skeleton-boot .sk-bar {
+  height: 14px;
+  border-radius: 7px;
+  background: linear-gradient(90deg, #F5E6EA 25%, #FBEFF2 37%, #F5E6EA 63%);
+  background-size: 400% 100%;
+  animation: skShimmer 1.4s ease infinite;
+  margin-bottom: 14px;
+}
+.skeleton-boot .sk-w60 { width: 60%; }
+.skeleton-boot .sk-w40 { width: 40%; }
+.skeleton-boot .sk-card {
+  height: 76px;
+  border-radius: 14px;
+  background: linear-gradient(90deg, #F7EDF0 25%, #FDF5F8 37%, #F7EDF0 63%);
+  background-size: 400% 100%;
+  animation: skShimmer 1.4s ease infinite;
+  margin-bottom: 12px;
+}
+@keyframes skShimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+@keyframes skFadeIn { from { opacity: 0; } to { opacity: 1; } }
