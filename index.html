@@ -42,7 +42,14 @@
 
   <!-- 主内容区 -->
   <main class="content" id="content">
-    <!-- 各视图由JS渲染 -->
+    <!-- 首屏骨架：抵消 JS 加载期间的空白/黑屏，渲染完成后由 JS 自动替换 -->
+    <div class="skeleton-boot" id="skeletonBoot">
+      <div class="sk-bar sk-w60"></div>
+      <div class="sk-card"></div>
+      <div class="sk-bar sk-w40"></div>
+      <div class="sk-card"></div>
+      <div class="sk-card"></div>
+    </div>
   </main>
 
   <!-- 提醒弹窗 -->
@@ -63,7 +70,8 @@
     <div class="voice-hint-bar"></div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
+  <!-- CryptoJS 异步加载：避免海外 CDN 阻塞首屏渲染（断网/慢网时不再黑屏） -->
+  <script async src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
   <script src="js/data.js"></script>
   <script src="js/app.js"></script>
 </body>
