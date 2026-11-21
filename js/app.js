@@ -5624,17 +5624,8 @@ function renderRevisitTasks(view) {
     </div>
   </div>`;
 
-  // 快速添加：一行搞定（姓名 + 周期 → 添加）
-  html += `<div class="rv2-addbar">
-    <input class="input-field rv2-add-name" id="rv2NewName" placeholder="客户姓名" onkeydown="if(event.key==='Enter')rv2AddRow()">
-    <select class="input-field rv2-add-cycle" id="rv2NewCycle">
-      <option value="m2">每月2次</option>
-      <option value="m3">每月3次</option>
-      <option value="w5">每周五</option>
-      <option value="w6">每周六</option>
-    </select>
-    <button class="btn btn-primary rv2-add-btn" onclick="rv2AddRow()">➕ 添加</button>
-  </div>`;
+  // 添加回访客户：先弹出资料库名单搜索勾选（只读资料库；资料库没有才手动新增）
+  html += `<button class="btn btn-primary btn-full" style="margin-bottom:14px;" onclick="showRv2PickerModal()">➕ 添加回访客户（从资料库选择）</button>`;
 
   html += `<div class="section-title">📇 回访客户（${ov.rows.length}）</div>`;
   if (ov.rows.length === 0) {
@@ -5675,21 +5666,126 @@ function renderRevisitTasks(view) {
   view.innerHTML = html;
 }
 
-// 新增客户：直接加一行，选好周期即可
-function rv2AddRow() {
-  const nameEl = document.getElementById('rv2NewName');
-  const cycEl = document.getElementById('rv2NewCycle');
-  if (!nameEl || !cycEl) return;
-  const name = nameEl.value.trim();
-  if (!name) { showToast('请输入客户姓名'); return; }
-  const cycle = rv2ParseCycle(cycEl.value);
+// 添加回访客户弹窗：从资料库搜索勾选（getLibraryArchives 只读，绝不写回/覆盖/合并原数据）
+function showRv2PickerModal() {
+  const archives = getLibraryArchives();
+  window._rv2PickSel = new Set();
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">➕ 添加回访客户</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="rv2PickSearch" placeholder="🔍 按名字搜索资料库顾客" oninput="rv2PickerFilter(this.value)" autofocus>
+    <div class="rv2-pick-list" id="rv2PickList">${rv2RenderPickList(archives)}</div>
+    <div style="text-align:center;margin:10px 0;">
+      <span style="font-size:12px;color:var(--text-light);">资料库里没有？</span>
+      <button class="btn btn-sm btn-outline" onclick="rv2PickerManualToggle()">✏️ 手动新增</button>
+    </div>
+    <div id="rv2ManualBox" style="display:none;">
+      <input class="input-field" id="rv2ManualName" placeholder="新客户姓名 *" oninput="rv2ManualNameCheck(this.value)">
+      <div id="rv2ManualHint" style="font-size:12px;color:#F44336;display:none;margin:-6px 0 8px;"></div>
+    </div>
+    <div class="rv2-addbar" style="margin-bottom:0;">
+      <select class="input-field rv2-add-cycle" id="rv2PickCycle" style="flex:2;margin:0 !important;">
+        <option value="m2">每月2次</option>
+        <option value="m3">每月3次</option>
+        <option value="w5">每周五</option>
+        <option value="w6">每周六</option>
+      </select>
+      <button class="btn btn-primary" style="flex:1;" onclick="rv2PickerConfirm()">✅ 加入回访清单</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-top:8px;">💡 勾选顾客 → 选好周期 → 加入清单；顾客资料库数据只读，不会被改动</div>
+  `;
+  showModal(html);
+}
+
+function rv2RenderPickList(list) {
+  if (!list || list.length === 0) {
+    return '<div style="font-size:12px;color:var(--text-light);padding:12px;text-align:center;">资料库暂无顾客，可点下方「手动新增」</div>';
+  }
+  return list.map(a => `
+    <div class="rv2-pick-item" data-aid="${a.id}" onclick="rv2PickerToggle('${a.id}')">
+      <div class="rv2-pick-check">✓</div>
+      <div class="rv2-pick-info">
+        <div class="rv2-pick-name">${escapeHtml(a.name)}${a.contact ? ' <span style="color:var(--text-light);font-size:11px;font-weight:400;">📞 ' + escapeHtml(a.contact) + '</span>' : ''}</div>
+        ${a.consultNotes ? '<div class="rv2-pick-note">🩺 ' + escapeHtml(String(a.consultNotes).slice(0, 30)) + '</div>' : ''}
+      </div>
+      <span class="lib-badge ${a.source === 'system' ? 'lib-badge-sys' : 'lib-badge-lib'}">${a.source === 'system' ? '系统' : '资料库'}</span>
+    </div>
+  `).join('');
+}
+
+function rv2PickerToggle(aid) {
+  const sel = window._rv2PickSel || new Set();
+  if (sel.has(aid)) sel.delete(aid); else sel.add(aid);
+  window._rv2PickSel = sel;
+  const item = document.querySelector('.rv2-pick-item[data-aid="' + aid + '"]');
+  if (item) item.classList.toggle('selected', sel.has(aid));
+}
+
+function rv2PickerFilter(kw) {
+  const listEl = document.getElementById('rv2PickList');
+  if (!listEl) return;
+  const q = (kw || '').trim().toLowerCase();
+  const all = getLibraryArchives();
+  const matched = !q ? all : all.filter(a =>
+    (a.name || '').toLowerCase().includes(q) ||
+    (a.contact || '').toLowerCase().includes(q)
+  );
+  listEl.innerHTML = rv2RenderPickList(matched);
+}
+
+function rv2ManualNameCheck(val) {
+  const hint = document.getElementById('rv2ManualHint');
+  if (!hint) return;
+  const name = (val || '').trim();
+  const exist = name && getLibraryArchives().some(a => a.name === name);
+  hint.style.display = exist ? 'block' : 'none';
+  if (exist) hint.textContent = '⚠️ 资料库已有「' + name + '」，请直接在上方搜索勾选';
+}
+
+function rv2PickerManualToggle() {
+  const box = document.getElementById('rv2ManualBox');
+  if (!box) return;
+  const show = box.style.display === 'none';
+  box.style.display = show ? 'block' : 'none';
+  if (show) {
+    const inp = document.getElementById('rv2ManualName');
+    if (inp) setTimeout(() => inp.focus(), 50);
+  }
+}
+
+function rv2PickerConfirm() {
+  const cycleEl = document.getElementById('rv2PickCycle');
+  if (!cycleEl) return;
+  const cycle = rv2ParseCycle(cycleEl.value);
   const rows = rvGetRows();
-  if (rows.some(r => r.name === name)) { showToast('⚠️ 该客户已在回访列表中'); return; }
-  rows.push({ id: 'rv' + Date.now(), name, cycle, createdAt: formatDateTime(new Date()) });
+  let added = 0;
+
+  // 1) 资料库勾选的顾客：仅读取姓名加入回访清单，不写回资料库任何键
+  (window._rv2PickSel || new Set()).forEach(aid => {
+    const a = getLibraryArchives().find(x => x.id === aid);
+    if (a && !rows.some(r => r.name === a.name)) {
+      rows.push({ id: 'rv' + Date.now() + '_' + (++added), name: a.name, cycle, createdAt: formatDateTime(new Date()) });
+    }
+  });
+
+  // 2) 手动新增：仅当资料库确无此人时
+  const manualEl = document.getElementById('rv2ManualName');
+  const manualName = manualEl ? manualEl.value.trim() : '';
+  if (manualName) {
+    if (getLibraryArchives().some(a => a.name === manualName)) {
+      showToast('⚠️ 资料库已有「' + manualName + '」，请在上方搜索勾选，未重复添加');
+    } else if (!rows.some(r => r.name === manualName)) {
+      rows.push({ id: 'rv' + Date.now() + '_m' + (++added), name: manualName, cycle, createdAt: formatDateTime(new Date()) });
+    }
+  }
+
+  if (added === 0) { showToast('请先勾选顾客，或填写新客户姓名'); return; }
   Store.set('rvRows', rows);
-  nameEl.value = '';
-  speak('已添加');
-  showToast('✅ 已添加：' + name + '（' + rvCycleLabel(cycle) + '）');
+  closeModal();
+  speak('已加入回访清单');
+  showToast('✅ 已加入 ' + added + ' 位客户（' + rvCycleLabel(cycle) + '）');
   rv2Refresh();
 }
 
