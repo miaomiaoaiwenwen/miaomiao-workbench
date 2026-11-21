@@ -1288,3 +1288,41 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
 .rv-weekday-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .rv-wd-chip { font-size: 12px; padding: 6px 12px; border-radius: 20px; background: #FFF7FA; border: 1.5px solid #FBE4EC; color: var(--text-light); cursor: pointer; font-weight: 600; }
 .rv-wd-chip.active { background: #F8BBD0; border-color: #F48FB1; color: #fff; }
+
+
+/* ==================== 极简回访打卡 rv2（独立新增样式） ==================== */
+.rv2-summary { background: #fff; border-radius: 16px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 2px 10px rgba(233,141,166,0.1); }
+.rv2-summary-row { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-light); flex-wrap: wrap; gap: 6px; }
+.rv2-summary-row b { font-size: 16px; color: var(--text); }
+.rv2-addbar { display: flex; gap: 6px; margin-bottom: 14px; align-items: stretch; }
+.rv2-add-name { flex: 2; margin: 0 !important; }
+.rv2-add-cycle { flex: 1.4; margin: 0 !important; padding-left: 6px !important; }
+.rv2-add-btn { flex-shrink: 0; padding: 0 14px !important; }
+.rv2-row { background: #fff; border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; box-shadow: 0 2px 8px rgba(233,141,166,0.08); }
+.rv2-row-overdue { border: 1.5px solid #FFCDD2; background: #FFF9F9; }
+.rv2-row-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rv2-row-name { font-size: 15px; font-weight: 700; cursor: pointer; }
+.rv2-cycle-tag { font-size: 11px; background: #FFF0F5; color: #E58CA6; padding: 2px 8px; border-radius: 8px; font-weight: 600; white-space: nowrap; }
+.rv2-badge { font-size: 10px; padding: 2px 8px; border-radius: 8px; font-weight: 700; white-space: nowrap; }
+.rv2-badge-overdue { background: #FFEBEE; color: #C62828; }
+.rv2-badge-today { background: #FFEDF3; color: #E0608E; }
+.rv2-badge-ok { background: #E8F5E9; color: #2E7D32; }
+.rv2-row-actions { margin-left: auto; display: flex; gap: 4px; }
+.rv2-mini-btn { background: none; border: none; font-size: 15px; padding: 2px 4px; cursor: pointer; }
+.rv2-row-progress { font-size: 12px; color: var(--text-light); margin: 6px 0 8px; }
+.rv2-row-progress b { color: #E0608E; }
+.rv2-slots { display: flex; gap: 8px; flex-wrap: wrap; }
+.rv2-slot { width: 52px; height: 44px; border-radius: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 12px; cursor: pointer; border: 1.5px solid #F3CFDB; background: #FFF7FA; color: #C9B8BE; }
+.rv2-slot b { font-size: 14px; line-height: 1.1; }
+.rv2-slot span { font-size: 10px; line-height: 1.2; }
+.rv2-slot-future { background: #F8F4F6; border-color: #EDE0E5; }
+.rv2-slot-today { background: #FFEDF3; border-color: #F48FB1; color: #E0608E; animation: rv2Pulse 1.6s ease infinite; }
+.rv2-slot-overdue { background: #FFEBEE; border-color: #E57373; color: #C62828; }
+.rv2-slot-done { background: #E8F5E9; border-color: #81C784; color: #2E7D32; }
+@keyframes rv2Pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+.rv2-home-card { background: #fff; border-radius: 14px; padding: 12px 14px; margin-bottom: 12px; box-shadow: 0 2px 8px rgba(233,141,166,0.1); border: 1px solid #FBE4EC; }
+.rv2-home-title { font-size: 14px; font-weight: 800; color: #E0608E; margin-bottom: 8px; }
+.rv2-home-label { font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+.rv2-home-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; border-radius: 10px; background: #FFF7FA; margin-bottom: 6px; gap: 8px; }
+.rv2-home-item-overdue { background: #FFF3F4; border: 1px dashed #E57373; }
+.rv2-home-name { font-size: 13px; font-weight: 600; }
