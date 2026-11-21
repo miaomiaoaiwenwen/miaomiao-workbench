@@ -738,6 +738,8 @@ function switchView(viewId) {
   switch(viewId) {
     case 'daily': renderDaily(view); break;
     case 'customers': renderCustomers(view); break;
+    case 'custlib': renderCustomerLibrary(view); break;
+    case 'revisit': renderRevisitTasks(view); break;
     case 'consumption': renderConsumption(view); break;
                                     case 'calendar': renderCalendar(view); break;
     case 'accounting': renderAccounting(view); break;
@@ -5008,6 +5010,1118 @@ function fallbackCopy(text) {
   ta.select();
   try { document.execCommand('copy'); showToast('📋 已复制'); } catch(e) { showToast('复制失败，请手动复制'); }
   document.body.removeChild(ta);
+}
+
+/* ================================================================
+   顾客资料库 + 周期回访 两大新模块（独立新增，零改动原有模块）
+   - 独立存储键：custLibExtra / custLibNotes / revisitTasks / revisitLogs
+   - 不在 DATA_KEYS 中 → 完全不影响原有备份/回滚/云同步机制
+   - 原有 customers 数据只读聚合展示，绝不写回、不覆盖
+   ================================================================ */
+
+/* ==================== 一、顾客资料库 ==================== */
+
+let libSearchKeyword = '';
+
+// 档案池 = 原有顾客跟进数据（只读聚合） + 资料库手动/回访新增（custLibExtra），一人一档（同名自动合并）
+function getLibraryArchives() {
+  const sys = Store.get('customers', []) || [];
+  const extra = Store.get('custLibExtra', []) || [];
+  const archives = sys.map(c => ({
+    id: c.id,
+    source: 'system',           // 系统已录入
+    name: c.name || '',
+    contact: c.contact || '',
+    createdAt: c.createdAt || '',
+    priority: c.priority || 'long',
+    completed: !!c.completed,
+    revisitDate: c.revisitDate || '',
+    projects: c.projects || [],
+    followups: c.followups || [],
+    consultNotes: c.consultNotes || '',
+    casualNotes: c.casualNotes || ''
+  }));
+  const nameSet = new Set(archives.map(a => a.name));
+  extra.forEach(e => {
+    if (!e || !e.name) return;
+    if (nameSet.has(e.name)) return; // 同名顾客：一人一档，自动归并到系统档案
+    archives.push({
+      id: e.id,
+      source: 'lib',              // 资料库新增
+      name: e.name || '',
+      contact: e.contact || '',
+      createdAt: e.createdAt || '',
+      priority: '',
+      completed: false,
+      revisitDate: '',
+      projects: [],
+      followups: [],
+      consultNotes: e.interest || '',
+      casualNotes: e.notes || '',
+      birthday: e.birthday || '',
+      skinType: e.skinType || '',
+      channel: e.channel || ''
+    });
+  });
+  archives.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh-CN'));
+  return archives;
+}
+
+function getLibNotesMap() { return Store.get('custLibNotes', {}) || {}; }
+
+function renderCustomerLibrary(view) {
+  const archives = getLibraryArchives();
+  const sysCount = archives.filter(a => a.source === 'system').length;
+  const libCount = archives.filter(a => a.source === 'lib').length;
+  const taskCount = (Store.get('revisitTasks', []) || []).length;
+
+  let html = `<div class="lib-stats-row">
+    <div class="lib-stat"><div class="ls-num">${archives.length}</div><div class="ls-label">总档案</div></div>
+    <div class="lib-stat"><div class="ls-num">${sysCount}</div><div class="ls-label">系统收录</div></div>
+    <div class="lib-stat"><div class="ls-num">${libCount}</div><div class="ls-label">资料库新增</div></div>
+    <div class="lib-stat"><div class="ls-num">${taskCount}</div><div class="ls-label">回访任务</div></div>
+  </div>`;
+
+  html += `<div class="lib-toolbar">
+    <button class="btn btn-primary" onclick="showLibAddCustomer()">➕ 新建顾客档案</button>
+    <button class="btn btn-outline" onclick="showLibraryExportModal()">📤 导出资料库</button>
+  </div>`;
+
+  html += `<div class="lib-search-wrap">
+    <input class="input-field" id="libSearch" placeholder="🔍 关键词检索：姓名 / 电话 / 痛点备注 / 项目..." value="${escapeHtml(libSearchKeyword)}" oninput="onLibSearch(this.value)">
+  </div>`;
+
+  html += `<div id="libListArea">${buildLibraryListHtml()}</div>`;
+  view.innerHTML = html;
+}
+
+function onLibSearch(val) {
+  libSearchKeyword = val || '';
+  const area = document.getElementById('libListArea');
+  if (area) area.innerHTML = buildLibraryListHtml();
+}
+
+function buildLibraryListHtml() {
+  const kw = libSearchKeyword.toLowerCase().trim();
+  let archives = getLibraryArchives();
+  if (kw) {
+    archives = archives.filter(a =>
+      (a.name || '').toLowerCase().includes(kw) ||
+      (a.contact || '').toLowerCase().includes(kw) ||
+      (a.consultNotes || '').toLowerCase().includes(kw) ||
+      (a.casualNotes || '').toLowerCase().includes(kw) ||
+      (a.birthday || '').toLowerCase().includes(kw) ||
+      (a.skinType || '').toLowerCase().includes(kw) ||
+      (a.channel || '').toLowerCase().includes(kw) ||
+      (a.projects || []).some(p => (p.name || '').toLowerCase().includes(kw)) ||
+      (a.followups || []).some(f => (f.content || '').toLowerCase().includes(kw))
+    );
+  }
+
+  if (archives.length === 0) {
+    return `<div class="empty-state"><div class="es-icon">🗂️</div><div class="es-text">${kw ? '没有找到匹配的顾客档案' : '资料库还是空的，系统顾客会自动收录进来'}</div></div>`;
+  }
+
+  let html = '';
+  archives.forEach(a => {
+    const p = PRIORITY[a.priority];
+    const projCount = (a.projects || []).length;
+    const fuCount = (a.followups || []).length;
+    const rvCount = getCustomerRevisitCount(a.id);
+    const srcBadge = a.source === 'system' ? '<span class="lib-badge lib-badge-sys">系统录入</span>' : '<span class="lib-badge lib-badge-lib">资料库建档</span>';
+    html += `
+      <div class="lib-archive-item" onclick="showLibraryDetail('${a.id}')">
+        <div class="lib-avatar">${escapeHtml((a.name || '?').slice(0, 1))}</div>
+        <div class="lib-archive-body">
+          <div class="lib-archive-name">${escapeHtml(a.name)} ${srcBadge}
+            ${p ? `<span class="cust-priority-tag ${p.tag}" style="font-size:10px;padding:2px 6px;">${p.label}</span>` : ''}
+            ${a.completed ? '<span class="lib-badge lib-badge-done">已成交</span>' : ''}
+          </div>
+          <div class="lib-archive-meta">
+            ${a.contact ? `<span>📞 ${escapeHtml(a.contact)}</span>` : '<span style="color:#C9B8BE;">未留联系方式</span>'}
+            <span>📌 ${projCount}项目</span>
+            <span>💬 ${fuCount}跟进</span>
+            ${rvCount ? `<span>📞 ${rvCount}回访</span>` : ''}
+          </div>
+        </div>
+        <div class="cust-activity-arrow">›</div>
+      </div>
+    `;
+  });
+  return html;
+}
+
+// 该顾客的周期回访完成总次数（从回访日志统计，只读）
+function getCustomerRevisitCount(aid) {
+  const logs = Store.get('revisitLogs', {}) || {};
+  const tasks = (Store.get('revisitTasks', []) || []).filter(t => t.customerId === aid);
+  const tIds = new Set(tasks.map(t => t.id));
+  let n = 0;
+  Object.keys(logs).forEach(k => {
+    const tid = k.split('|')[0];
+    if (tIds.has(tid) && logs[k] && logs[k].done) n++;
+  });
+  return n;
+}
+
+function getCustomerRevisitRecords(aid) {
+  const logs = Store.get('revisitLogs', {}) || {};
+  const tasks = (Store.get('revisitTasks', []) || []).filter(t => t.customerId === aid);
+  const tMap = {}; tasks.forEach(t => { tMap[t.id] = t; });
+  const records = [];
+  Object.keys(logs).forEach(k => {
+    const tid = k.split('|')[0];
+    if (tMap[tid] && logs[k] && logs[k].done) {
+      records.push({ date: k.split('|')[1], task: tMap[tid], log: logs[k] });
+    }
+  });
+  records.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  return records;
+}
+
+// 一人一档：完整档案详情（系统数据只读展示 + 补充备注可写）
+function showLibraryDetail(aid) {
+  const archives = getLibraryArchives();
+  const a = archives.find(x => x.id === aid);
+  if (!a) { showToast('档案不存在'); return; }
+
+  const notes = (getLibNotesMap()[aid]) || [];
+  const rvRecords = getCustomerRevisitCount(aid) > 0 ? getCustomerRevisitRecords(aid) : [];
+  const p = PRIORITY[a.priority];
+
+  // 合并时间线：跟进 + 项目 + 补充备注 + 回访记录 + 建档
+  const timeline = [];
+  (a.followups || []).forEach(f => timeline.push({ date: f.date || '', icon: '💬', label: '顾客跟进', content: f.content || '' }));
+  (a.projects || []).forEach(pr => timeline.push({ date: pr.date || '', icon: '📌', label: '铺垫项目' + (pr.completed ? '（已完成）' : ''), content: pr.name + (pr.thought ? ' · ' + pr.thought : '') }));
+  notes.forEach(n => timeline.push({ date: n.date || '', icon: '🗒️', label: '档案补充备注', content: n.content || '' }));
+  rvRecords.forEach(r => {
+    const t = r.task || {};
+    const parts = [];
+    if (t.goal) parts.push('🎯 ' + t.goal);
+    if (t.need) parts.push('📋 ' + t.need);
+    if (t.focus) parts.push('⭐ ' + t.focus);
+    if (r.log && r.log.note) parts.push('📝 ' + r.log.note);
+    timeline.push({ date: r.date, icon: '📞', label: '周期回访（' + rvDescribeCycle(t.cycle) + '）', content: parts.join('<br>') || '已完成回访' });
+  });
+  if (a.createdAt) timeline.push({ date: a.createdAt, icon: '📁', label: '建档', content: a.source === 'system' ? '由「顾客跟进」系统自动收录' : '资料库手动建档' });
+  timeline.sort((x, y) => (y.date || '').localeCompare(x.date || ''));
+
+  const srcBadge = a.source === 'system' ? '<span class="lib-badge lib-badge-sys">系统录入 · 只读聚合</span>' : '<span class="lib-badge lib-badge-lib">资料库建档</span>';
+
+  let html = `
+    <div class="modal-header">
+      <div class="modal-title">🗂️ 顾客档案 · ${escapeHtml(a.name)}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="lib-detail-head">
+      <div class="lib-avatar lib-avatar-lg">${escapeHtml((a.name || '?').slice(0, 1))}</div>
+      <div>
+        <div style="font-size:16px;font-weight:700;">${escapeHtml(a.name)} ${srcBadge}</div>
+        <div style="font-size:12px;color:var(--text-light);margin-top:4px;">
+          ${p ? `<span class="cust-priority-tag ${p.tag}" style="font-size:10px;">${p.label}</span> ` : ''}
+          ${a.completed ? '<span class="lib-badge lib-badge-done">已成交</span> ' : ''}
+          建档：${escapeHtml(a.createdAt || '未知')}
+        </div>
+      </div>
+    </div>
+    <div class="lib-detail-grid">
+      <div class="ldg-item"><span class="ldg-label">联系电话</span><span>${a.contact ? escapeHtml(a.contact) : '—'}</span></div>
+      ${a.birthday ? `<div class="ldg-item"><span class="ldg-label">生日</span><span>${escapeHtml(a.birthday)}</span></div>` : ''}
+      ${a.skinType ? `<div class="ldg-item"><span class="ldg-label">肤质/皮肤状况</span><span>${escapeHtml(a.skinType)}</span></div>` : ''}
+      ${a.channel ? `<div class="ldg-item"><span class="ldg-label">获客渠道</span><span>${escapeHtml(a.channel)}</span></div>` : ''}
+      ${a.revisitDate ? `<div class="ldg-item"><span class="ldg-label">约定回访</span><span>${escapeHtml(a.revisitDate)}</span></div>` : ''}
+      <div class="ldg-item"><span class="ldg-label">累计回访</span><span>${rvRecords.length} 次</span></div>
+    </div>
+    ${a.consultNotes ? `<div class="lib-note-block"><div class="lib-note-title">🩺 面诊痛点备注</div><div class="lib-note-content">${escapeHtml(a.consultNotes).replace(/\n/g, '<br>')}</div></div>` : ''}
+    ${a.casualNotes ? `<div class="lib-note-block"><div class="lib-note-title">💛 客情随手记</div><div class="lib-note-content">${escapeHtml(a.casualNotes).replace(/\n/g, '<br>')}</div></div>` : ''}
+    ${(a.projects || []).length ? `<div class="lib-note-block"><div class="lib-note-title">📌 铺垫项目（${a.projects.length}）</div><div class="lib-note-content">${a.projects.map(pr => `<span class="cust-project-tag ${pr.completed ? 'done' : ''}">${escapeHtml(pr.name)}</span>`).join('')}</div></div>` : ''}
+    <div style="display:flex;gap:8px;margin:12px 0;">
+      <button class="btn btn-outline" style="flex:1;" onclick="showLibAddNoteModal('${a.id}')">🗒️ 补充档案备注</button>
+      ${a.source === 'lib'
+        ? `<button class="btn btn-outline" style="flex:1;" onclick="showLibEditExtra('${a.id}')">✏️ 编辑资料</button>`
+        : `<button class="btn btn-outline" style="flex:1;" onclick="closeModal();showCustomerDetail('${a.id}')">👥 顾客跟进详情</button>`}
+      <button class="btn btn-outline" style="flex:1;" onclick="exportLibrarySingleCSV('${a.id}')">📤 导出本档案</button>
+    </div>
+    <div class="section-title">📜 全部记录（永久留存 · ${timeline.length}条）</div>
+    <div class="lib-timeline">
+      ${timeline.length === 0 ? '<div style="font-size:12px;color:var(--text-light);padding:8px 0;">暂无记录</div>' :
+        timeline.map(t => `
+          <div class="lib-tl-item">
+            <div class="lib-tl-icon">${t.icon}</div>
+            <div class="lib-tl-body">
+              <div class="lib-tl-meta">${escapeHtml(t.date || '')} · ${t.label}</div>
+              <div class="lib-tl-content">${t.content}</div>
+            </div>
+          </div>
+        `).join('')}
+    </div>
+    ${a.source === 'lib' ? `<button class="btn btn-sm btn-outline" style="margin-top:10px;color:#E57373;border-color:#FFCDD2;" onclick="deleteLibExtra('${a.id}')">🗑 删除此资料库档案（不影响系统顾客数据）</button>` : ''}
+  `;
+  showModal(html);
+}
+
+// 补充档案备注（挂在对应顾客档案下，永久留存）
+function showLibAddNoteModal(aid) {
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">🗒️ 补充档案备注</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <textarea class="input-field" id="libNoteContent" rows="4" placeholder="记录新的跟进内容、备注信息..." autofocus></textarea>
+    <button class="btn btn-primary btn-full" onclick="saveLibAddNote('${aid}')">保存备注</button>
+  `;
+  showModal(html);
+}
+
+function saveLibAddNote(aid) {
+  const content = document.getElementById('libNoteContent').value.trim();
+  if (!content) { showToast('请输入备注内容'); return; }
+  const map = getLibNotesMap();
+  if (!map[aid]) map[aid] = [];
+  map[aid].push({ date: formatDate(new Date()), content });
+  Store.set('custLibNotes', map);
+  closeModal();
+  showToast('✅ 已挂靠到顾客档案');
+  showLibraryDetail(aid);
+}
+
+// 资料库手动新增顾客（自动归档进资料库；同名自动拦截，一人一档）
+function showLibAddCustomer() {
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">🗂️ 新建顾客档案</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="libNewName" placeholder="顾客姓名 *" autofocus>
+    <input class="input-field" id="libNewContact" placeholder="联系电话 / 微信号">
+    <input class="input-field" id="libNewBirthday" placeholder="生日（如 3-18 或 1990-03-18）">
+    <input class="input-field" id="libNewSkin" placeholder="肤质 / 皮肤状况（如：敏感肌、口周凹陷）">
+    <input class="input-field" id="libNewChannel" placeholder="获客渠道（如：朋友介绍、抖音）">
+    <textarea class="input-field" id="libNewNotes" placeholder="备注（意向项目、消费习惯、注意事项等）" rows="3"></textarea>
+    <div style="font-size:12px;color:var(--text-light);margin:6px 0 10px;">💡 保存后自动归档进资料库；同名顾客将被拦截，保证一人一档</div>
+    <button class="btn btn-primary btn-full" onclick="saveLibNewCustomer()">保存归档</button>
+  `;
+  showModal(html);
+}
+
+function saveLibNewCustomer() {
+  const name = document.getElementById('libNewName').value.trim();
+  if (!name) { showToast('请输入顾客姓名'); return; }
+  // 一人一档：同名拦截（含系统顾客）
+  const existing = getLibraryArchives().find(a => a.name === name);
+  if (existing) { showToast('⚠️ 已存在同名档案「' + name + '」，请在原档案补充备注'); return; }
+  const extra = Store.get('custLibExtra', []) || [];
+  extra.push({
+    id: 'L' + Date.now(),
+    name,
+    contact: document.getElementById('libNewContact').value.trim(),
+    birthday: document.getElementById('libNewBirthday').value.trim(),
+    skinType: document.getElementById('libNewSkin').value.trim(),
+    channel: document.getElementById('libNewChannel').value.trim(),
+    notes: document.getElementById('libNewNotes').value.trim(),
+    createdAt: formatDate(new Date())
+  });
+  Store.set('custLibExtra', extra);
+  closeModal();
+  speak('已归档');
+  showToast('✅ 已归档进顾客资料库');
+  const view = document.getElementById('view-custlib');
+  if (view && currentView === 'custlib') renderCustomerLibrary(view);
+}
+
+function showLibEditExtra(lid) {
+  const extra = Store.get('custLibExtra', []) || [];
+  const e = extra.find(x => x.id === lid);
+  if (!e) return;
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">✏️ 编辑档案资料</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input class="input-field" id="libEditName" value="${escapeHtml(e.name).replace(/&quot;/g, '&quot;')}" autofocus>
+    <input class="input-field" id="libEditContact" value="${escapeHtml(e.contact || '')}" placeholder="联系电话">
+    <input class="input-field" id="libEditBirthday" value="${escapeHtml(e.birthday || '')}" placeholder="生日">
+    <input class="input-field" id="libEditSkin" value="${escapeHtml(e.skinType || '')}" placeholder="肤质/皮肤状况">
+    <input class="input-field" id="libEditChannel" value="${escapeHtml(e.channel || '')}" placeholder="获客渠道">
+    <textarea class="input-field" id="libEditNotes" rows="3" placeholder="备注">${escapeHtml(e.notes || '')}</textarea>
+    <button class="btn btn-primary btn-full" onclick="saveLibEditExtra('${lid}')">保存</button>
+  `;
+  showModal(html);
+}
+
+function saveLibEditExtra(lid) {
+  const name = document.getElementById('libEditName').value.trim();
+  if (!name) { showToast('请输入顾客姓名'); return; }
+  const extra = Store.get('custLibExtra', []) || [];
+  const e = extra.find(x => x.id === lid);
+  if (!e) return;
+  e.name = name;
+  e.contact = document.getElementById('libEditContact').value.trim();
+  e.birthday = document.getElementById('libEditBirthday').value.trim();
+  e.skinType = document.getElementById('libEditSkin').value.trim();
+  e.channel = document.getElementById('libEditChannel').value.trim();
+  e.notes = document.getElementById('libEditNotes').value.trim();
+  Store.set('custLibExtra', extra);
+  closeModal();
+  showToast('✅ 已更新');
+  showLibraryDetail(lid);
+}
+
+// 仅允许删除资料库自建档案，原系统顾客数据绝不在此删除
+function deleteLibExtra(lid) {
+  showConfirm('确定删除该资料库档案吗？仅删除资料库自建档案，不会影响「顾客跟进」中的任何系统数据。', '删除', () => {
+    let extra = Store.get('custLibExtra', []) || [];
+    extra = extra.filter(x => x.id !== lid);
+    Store.set('custLibExtra', extra);
+    const notesMap = getLibNotesMap();
+    if (notesMap[lid]) { delete notesMap[lid]; Store.set('custLibNotes', notesMap); }
+    closeModal();
+    showToast('已删除');
+    const view = document.getElementById('view-custlib');
+    if (view && currentView === 'custlib') renderCustomerLibrary(view);
+  }, '取消');
+}
+
+/* ---------- 资料库导出：整体 / 选择性 / 单档案（CSV + JSON 双格式） ---------- */
+
+function showLibraryExportModal() {
+  const archives = getLibraryArchives();
+  window._libExportSel = new Set(archives.map(a => a.id));
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">📤 导出顾客资料库</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:10px;line-height:1.7;">
+      💡 CSV 适合 Excel/WPS 整理线下存档；JSON 为完整备份（含全部跟进/回访记录），可随时导入恢复
+    </div>
+    <div class="lib-export-actions">
+      <label class="lib-export-all"><input type="checkbox" id="libExportAllChk" checked onchange="libToggleExportAll(this.checked)"> 全选（${archives.length} 个档案）</label>
+    </div>
+    <div class="lib-export-list" id="libExportList">
+      ${archives.map(a => `
+        <label class="lib-export-row" data-aid="${a.id}">
+          <input type="checkbox" checked onchange="libToggleExportRow('${a.id}')">
+          <span class="ler-name">${escapeHtml(a.name)}</span>
+          <span class="ler-contact">${escapeHtml(a.contact || '')}</span>
+          <span class="lib-badge ${a.source === 'system' ? 'lib-badge-sys' : 'lib-badge-lib'}">${a.source === 'system' ? '系统' : '资料库'}</span>
+        </label>
+      `).join('')}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <button class="btn btn-primary" style="flex:1;" onclick="doExportLibraryCSV()">📊 导出 CSV</button>
+      <button class="btn btn-outline" style="flex:1;" onclick="doExportLibraryJSON()">💾 导出完整备份 JSON</button>
+    </div>
+  `;
+  showModal(html);
+}
+
+function libToggleExportRow(aid) {
+  const sel = window._libExportSel || new Set();
+  if (sel.has(aid)) sel.delete(aid); else sel.add(aid);
+  window._libExportSel = sel;
+  syncLibExportAllChk();
+}
+function libToggleExportAll(checked) {
+  const archives = getLibraryArchives();
+  window._libExportSel = checked ? new Set(archives.map(a => a.id)) : new Set();
+  document.querySelectorAll('#libExportList .lib-export-row input[type=checkbox]').forEach(cb => { cb.checked = checked; });
+}
+function syncLibExportAllChk() {
+  const all = document.getElementById('libExportAllChk');
+  const archives = getLibraryArchives();
+  if (all) all.checked = window._libExportSel && window._libExportSel.size === archives.length;
+}
+
+function buildLibraryCSV(archives) {
+  const headers = ['姓名','联系电话','顾客来源','建档时间','回访紧急等级','当前状态','铺垫项目','项目数','跟进记录数','面诊痛点备注','客情随手记','约定回访时间','档案补充备注','生日','肤质/皮肤状况','获客渠道','累计回访次数','最近回访时间'];
+  const prioNames = { urgent: '7天紧急回访', month: '1个月内回访', long: '长期慢慢跟进' };
+  let csv = '\uFEFF' + headers.join(',') + '\n';
+  archives.forEach(a => {
+    const notes = (getLibNotesMap()[a.id]) || [];
+    const rvRecords = getCustomerRevisitRecords(a.id);
+    const lastRv = rvRecords.length ? rvRecords[0].date : '';
+    const row = [
+      a.name, a.contact,
+      a.source === 'system' ? '系统录入' : '资料库建档',
+      a.createdAt || '',
+      prioNames[a.priority] || '',
+      a.completed ? '已成交' : '跟进中',
+      (a.projects || []).map(p => p.name).join(' / '),
+      (a.projects || []).length,
+      (a.followups || []).length,
+      a.consultNotes || '', a.casualNotes || '', a.revisitDate || '',
+      notes.map(n => '[' + n.date + '] ' + n.content).join('\n'),
+      a.birthday || '', a.skinType || '', a.channel || '',
+      rvRecords.length, lastRv
+    ];
+    csv += row.map(cell => {
+      const s = String(cell !== null && cell !== undefined ? cell : '');
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',') + '\n';
+  });
+  return csv;
+}
+
+function downloadFile(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function doExportLibraryCSV() {
+  const sel = window._libExportSel || new Set();
+  const all = getLibraryArchives();
+  const chosen = sel.size === all.length ? all : all.filter(a => sel.has(a.id));
+  if (chosen.length === 0) { showToast('请至少选择一个顾客档案'); return; }
+  const csv = buildLibraryCSV(chosen);
+  downloadFile(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `顾客资料库_${formatDate(new Date())}_${chosen.length}人.csv`);
+  speak('已导出');
+  showToast('✅ CSV 已导出（' + chosen.length + ' 个档案）');
+}
+
+function doExportLibraryJSON() {
+  const sel = window._libExportSel || new Set();
+  const all = getLibraryArchives();
+  const chosen = sel.size === all.length ? all : all.filter(a => sel.has(a.id));
+  if (chosen.length === 0) { showToast('请至少选择一个顾客档案'); return; }
+  const payload = {
+    _type: 'miaomiao-customer-library-export',
+    _version: '1.0',
+    exportedAt: formatDateTime(new Date()),
+    archives: chosen,
+    custLibExtra: Store.get('custLibExtra', []),
+    custLibNotes: getLibNotesMap(),
+    revisitTasks: Store.get('revisitTasks', []),
+    revisitLogs: Store.get('revisitLogs', {})
+  };
+  downloadFile(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8;' }), `顾客资料库完整备份_${formatDate(new Date())}.json`);
+  speak('已导出');
+  showToast('✅ 完整备份 JSON 已导出');
+}
+
+function exportLibrarySingleCSV(aid) {
+  const a = getLibraryArchives().find(x => x.id === aid);
+  if (!a) return;
+  const csv = buildLibraryCSV([a]);
+  downloadFile(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `顾客档案_${a.name}_${formatDate(new Date())}.csv`);
+  showToast('✅ 单档案 CSV 已导出');
+}
+
+/* ==================== 二、周期性顾客回访任务 ==================== */
+
+let revisitWeekStart = '';   // 周视图当前周（周一日期），空 = 本周
+
+function rvGetWeekStart(d) {
+  const dt = d ? new Date(typeof d === 'string' ? d + 'T00:00:00' : d) : new Date();
+  const day = (dt.getDay() + 6) % 7; // 周一=0
+  dt.setDate(dt.getDate() - day);
+  dt.setHours(0, 0, 0, 0);
+  return formatDate(dt);
+}
+function rvAddDays(dateKey, n) {
+  const dt = new Date(dateKey + 'T00:00:00');
+  dt.setDate(dt.getDate() + n);
+  return formatDate(dt);
+}
+function rvWeekLabel(startKey) {
+  const end = rvAddDays(startKey, 6);
+  return startKey.slice(5).replace('-', '/') + ' ~ ' + end.slice(5).replace('-', '/');
+}
+function rvIsThisWeek(startKey) { return startKey === rvGetWeekStart(new Date()); }
+
+// 每月生成日：把 N 次均匀分布到当月（如每月3次 → 约 10/20/30 号附近）
+function rvMonthGeneratedDays(year, month0, times) {
+  const daysInMonth = new Date(year, month0 + 1, 0).getDate();
+  const t = Math.max(1, times);
+  const days = [];
+  for (let k = 0; k < t; k++) {
+    let d = Math.round(((k + 1) * daysInMonth) / (t + 1));
+    d = Math.max(1, Math.min(daysInMonth, d));
+    days.push(d);
+  }
+  return [...new Set(days)].sort((a, b) => a - b);
+}
+
+// 核心生成器：某一周的回访待办实例（纯计算，不写库；完成状态从 revisitLogs 读取）
+function rvGenerateWeekInstances(weekStart) {
+  const tasks = (Store.get('revisitTasks', []) || []).filter(t => !t.paused);
+  const logs = Store.get('revisitLogs', {}) || {};
+  const instances = [];
+  tasks.forEach(t => {
+    const cyc = t.cycle || { unit: 'week', times: 1, weekDays: [1] };
+    for (let i = 0; i < 7; i++) {
+      const dateKey = rvAddDays(weekStart, i);
+      if (t.startDate && dateKey < t.startDate) continue;
+      let seq = null;
+      const dt = new Date(dateKey + 'T00:00:00');
+      if (cyc.unit === 'week') {
+        let wd = Array.isArray(cyc.weekDays) && cyc.weekDays.length ? [...cyc.weekDays].sort((a, b) => a - b) : [];
+        if (!wd.length) {
+          // 未选星期时按次数均匀分布到一周
+          for (let k = 0; k < (cyc.times || 1); k++) wd.push(Math.max(1, Math.min(7, Math.round(((k + 1) * 7) / ((cyc.times || 1) + 1)))));
+          wd = [...new Set(wd)].sort((a, b) => a - b);
+        }
+        const jsDay = ((dt.getDay() + 6) % 7) + 1; // 1=周一 ... 7=周日
+        const idx = wd.indexOf(jsDay);
+        if (idx >= 0) seq = idx;
+      } else if (cyc.unit === 'month') {
+        const dayNums = rvMonthGeneratedDays(dt.getFullYear(), dt.getMonth(), cyc.times || 1);
+        const idx = dayNums.indexOf(dt.getDate());
+        if (idx >= 0) seq = idx;
+      } else { // 自定义间隔：每 N 天 1 次，从任务开始日期起算
+        const n = Math.max(1, parseInt(cyc.intervalDays, 10) || 1);
+        const base = new Date((t.startDate || todayKey()) + 'T00:00:00');
+        const diff = Math.floor((dt - base) / 86400000);
+        if (diff >= 0 && diff % n === 0) seq = 0;
+      }
+      if (seq !== null) {
+        const key = t.id + '|' + dateKey + '|' + seq;
+        const lg = logs[key];
+        instances.push({
+          key, taskId: t.id, task: t, date: dateKey, seq,
+          done: !!(lg && lg.done),
+          doneAt: (lg && lg.doneAt) || '',
+          note: (lg && lg.note) || ''
+        });
+      }
+    }
+  });
+  instances.sort((a, b) => a.date.localeCompare(b.date) || (a.task.customerName || '').localeCompare(b.task.customerName || '', 'zh-CN'));
+  return instances;
+}
+
+function rvDescribeCycle(cyc) {
+  if (!cyc) return '每周1次';
+  if (cyc.unit === 'week') {
+    const names = { 1: '周一', 2: '周二', 3: '周三', 4: '周四', 5: '周五', 6: '周六', 7: '周日' };
+    let wd = (cyc.weekDays || []).map(d => names[d]).join('、');
+    if (!wd) wd = '自动分布';
+    return '每周' + (cyc.times || 1) + '次（' + wd + '）';
+  }
+  if (cyc.unit === 'month') return '每月' + (cyc.times || 1) + '次（自动均匀分布）';
+  return '每' + (cyc.intervalDays || 1) + '天1次';
+}
+
+function renderRevisitTasks(view) {
+  if (!revisitWeekStart) revisitWeekStart = rvGetWeekStart(new Date());
+
+  const instances = rvGenerateWeekInstances(revisitWeekStart);
+  const doneCount = instances.filter(i => i.done).length;
+  const undoneCount = instances.length - doneCount;
+  const pct = instances.length ? Math.round((doneCount / instances.length) * 100) : 0;
+  const tasks = (Store.get('revisitTasks', []) || []);
+
+  // 周完成率进度条
+  let html = `<div class="rv-summary">
+    <div class="rv-summary-top">
+      <div class="rv-week-nav">
+        <button class="rv-nav-btn" onclick="rvShiftWeek(-1)">‹</button>
+        <div class="rv-week-label" onclick="rvGoThisWeek()">
+          ${rvWeekLabel(revisitWeekStart)}${rvIsThisWeek(revisitWeekStart) ? ' <span class="rv-this-week">本周</span>' : ''}
+        </div>
+        <button class="rv-nav-btn" onclick="rvShiftWeek(1)">›</button>
+      </div>
+    </div>
+    <div class="rv-summary-stats">
+      <span>📋 本周应回访 <b>${instances.length}</b> 人次</span>
+      <span style="color:#2E7D32;">✅ 已完成 <b>${doneCount}</b></span>
+      <span style="color:#C62828;">⏳ 未完成 <b>${undoneCount}</b></span>
+    </div>
+    <div class="rv-progress-track"><div class="rv-progress-fill" style="width:${pct}%;"></div></div>
+    <div style="font-size:11px;color:var(--text-light);text-align:right;">完成率 ${pct}%</div>
+  </div>`;
+
+  // 周视图：按日期分组的待办清单
+  html += `<div class="section-title">📆 每周回访待办清单</div>`;
+  if (instances.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">🔁</div><div class="es-text">本周暂无回访待办<br><span style="font-size:11px;">点击下方「新建回访任务」开始自动排期</span></div></div>`;
+  } else {
+    const weeks = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const days = [...new Set(instances.map(i => i.date))].sort();
+    days.forEach(dk => {
+      const dt = new Date(dk + 'T00:00:00');
+      const isToday = dk === todayKey();
+      const dayItems = instances.filter(i => i.date === dk);
+      html += `<div class="rv-day-group">
+        <div class="rv-day-header">${dk.slice(5).replace('-', '/')} ${weeks[dt.getDay()]}${isToday ? ' <span class="rv-today-tag">今天</span>' : ''}
+          <span style="font-weight:400;color:var(--text-light);">（${dayItems.filter(i => i.done).length}/${dayItems.length} 已完成）</span>
+        </div>
+        ${dayItems.map(i => `
+          <div class="rv-item ${i.done ? 'rv-done' : ''}" onclick="showRevisitItemDetail('${i.key}')">
+            <div class="rv-check ${i.done ? 'checked' : ''}" onclick="event.stopPropagation();rvToggleDone('${i.key}')">${i.done ? '✓' : ''}</div>
+            <div class="rv-item-body">
+              <div class="rv-item-name">👤 ${escapeHtml(i.task.customerName || '未命名顾客')}</div>
+              <div class="rv-item-goal">${i.task.goal ? '🎯 ' + escapeHtml(i.task.goal) : ''}${i.task.need ? '　📋 ' + escapeHtml(i.task.need) : ''}</div>
+              <div class="rv-item-meta">${rvDescribeCycle(i.task.cycle)}${i.done ? ' · 完成于 ' + escapeHtml(i.doneAt) : ''}</div>
+            </div>
+            <div class="cust-activity-arrow">›</div>
+          </div>
+        `).join('')}
+      </div>`;
+    });
+  }
+
+  // 任务管理
+  html += `<div class="section-title">⚙️ 回访任务管理（${tasks.length}）</div>`;
+  if (tasks.length === 0) {
+    html += `<div style="font-size:12px;color:var(--text-light);margin-bottom:10px;">还没有回访任务，创建后系统将按周期自动生成每周待办清单</div>`;
+  } else {
+    const thisWeek = rvGenerateWeekInstances(rvGetWeekStart(new Date()));
+    tasks.forEach(t => {
+      const tw = thisWeek.filter(i => i.taskId === t.id);
+      const twDone = tw.filter(i => i.done).length;
+      const arch = getLibraryArchives().find(a => a.id === t.customerId);
+      html += `
+        <div class="rv-task-card ${t.paused ? 'rv-paused' : ''}">
+          <div class="rv-task-head">
+            <div class="rv-task-name">${t.paused ? '⏸️ ' : ''}👤 ${escapeHtml(t.customerName || '')}${arch ? '' : ' <span class="lib-badge lib-badge-gone">档案已删除</span>'}</div>
+            <div class="rv-task-cycle">${rvDescribeCycle(t.cycle)}</div>
+          </div>
+          ${t.goal ? `<div class="rv-task-line">🎯 回访目标：${escapeHtml(t.goal)}</div>` : ''}
+          ${t.need ? `<div class="rv-task-line">📋 回访需求：${escapeHtml(t.need)}</div>` : ''}
+          ${t.focus ? `<div class="rv-task-line">⭐ 跟进重点：${escapeHtml(t.focus)}</div>` : ''}
+          <div class="rv-task-line" style="color:var(--text-light);">📅 开始日期 ${escapeHtml(t.startDate || '')} · 本周 ${twDone}/${tw.length}</div>
+          <div class="rv-task-actions">
+            <button class="btn btn-sm btn-outline" onclick="showRevisitTaskModal('${t.id}')">✏️ 编辑</button>
+            <button class="btn btn-sm btn-outline" onclick="rvTogglePause('${t.id}')">${t.paused ? '▶️ 恢复' : '⏸️ 暂停'}</button>
+            <button class="btn btn-sm btn-outline" onclick="showRevisitTaskHistory('${t.id}')">📜 历史</button>
+            <button class="btn btn-sm btn-outline" style="color:#E57373;border-color:#FFCDD2;" onclick="rvDeleteTask('${t.id}')">🗑</button>
+          </div>
+        </div>
+      `;
+    });
+  }
+
+  html += `<button class="btn btn-primary btn-full" style="margin-top:8px;" onclick="showRevisitTaskModal()">➕ 新建回访任务</button>`;
+  view.innerHTML = html;
+}
+
+function rvShiftWeek(delta) {
+  revisitWeekStart = rvAddDays(revisitWeekStart, delta * 7);
+  const view = document.getElementById('view-revisit');
+  if (view) renderRevisitTasks(view);
+}
+function rvGoThisWeek() {
+  revisitWeekStart = rvGetWeekStart(new Date());
+  const view = document.getElementById('view-revisit');
+  if (view) renderRevisitTasks(view);
+}
+
+// 单次回访完成打勾（写入独立 revisitLogs，不碰任何原有数据）
+function rvToggleDone(key) {
+  const logs = Store.get('revisitLogs', {}) || {};
+  if (logs[key] && logs[key].done) {
+    delete logs[key];
+    Store.set('revisitLogs', logs);
+    showToast('已取消完成标记');
+  } else {
+    logs[key] = { done: true, doneAt: formatDateTime(new Date()) };
+    Store.set('revisitLogs', logs);
+    speak('回访完成');
+    showToast('✅ 已标记完成');
+  }
+  const view = document.getElementById('view-revisit');
+  if (view && currentView === 'revisit') renderRevisitTasks(view);
+}
+
+function showRevisitItemDetail(key) {
+  const logs = Store.get('revisitLogs', {}) || {};
+  const parts = key.split('|');
+  const taskId = parts[0], date = parts[1], seq = parts[2];
+  const t = (Store.get('revisitTasks', []) || []).find(x => x.id === taskId);
+  if (!t) { showToast('任务不存在或已删除'); return; }
+  const lg = logs[key] || {};
+  const arch = getLibraryArchives().find(a => a.id === t.customerId);
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">📞 回访详情 · ${escapeHtml(t.customerName || '')}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="lib-detail-grid" style="margin-bottom:10px;">
+      <div class="ldg-item"><span class="ldg-label">回访日期</span><span>${escapeHtml(date)}</span></div>
+      <div class="ldg-item"><span class="ldg-label">回访周期</span><span>${rvDescribeCycle(t.cycle)}</span></div>
+      <div class="ldg-item"><span class="ldg-label">完成状态</span><span>${lg.done ? '✅ 已完成（' + escapeHtml(lg.doneAt || '') + '）' : '⏳ 未完成'}</span></div>
+    </div>
+    ${t.goal ? `<div class="lib-note-block"><div class="lib-note-title">🎯 回访目标</div><div class="lib-note-content">${escapeHtml(t.goal)}</div></div>` : ''}
+    ${t.need ? `<div class="lib-note-block"><div class="lib-note-title">📋 回访需求</div><div class="lib-note-content">${escapeHtml(t.need)}</div></div>` : ''}
+    ${t.focus ? `<div class="lib-note-block"><div class="lib-note-title">⭐ 跟进重点</div><div class="lib-note-content">${escapeHtml(t.focus)}</div></div>` : ''}
+    <button class="btn btn-primary btn-full" onclick="rvToggleDone('${key}');closeModal();">${lg.done ? '↩️ 取消完成标记' : '✅ 标记本次回访完成'}</button>
+    ${arch ? `<button class="btn btn-outline btn-full" style="margin-top:8px;" onclick="closeModal();showLibraryDetail('${arch.id}')">🗂️ 查看顾客完整档案</button>` : ''}
+  `;
+  showModal(html);
+}
+
+/* ---------- 回访任务新建/编辑（资料库选人 + 手动建档 两种方式） ---------- */
+
+function showRevisitTaskModal(taskId) {
+  const tasks = (Store.get('revisitTasks', []) || []);
+  const t = taskId ? tasks.find(x => x.id === taskId) : null;
+  const archives = getLibraryArchives();
+  window._rvPickerCustomers = archives;
+  window._rvPickerSelected = t ? t.customerId : '';
+  window._rvCycle = t ? JSON.parse(JSON.stringify(t.cycle)) : { unit: 'week', times: 1, weekDays: [1], intervalDays: 7 };
+
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">${t ? '✏️ 编辑回访任务' : '➕ 新建回访任务'}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="section-title" style="font-size:13px;">1️⃣ 选择顾客（支持搜索检索资料库）</div>
+    <div class="customer-selector" id="rvCustomerSelector">
+      <div class="cs-trigger ${window._rvPickerSelected ? '' : 'unselected'}" id="rvTrigger" onclick="rvTogglePicker()">
+        <span class="cs-trigger-icon">👤</span>
+        <span class="cs-trigger-text" id="rvTriggerText">${t ? '<b>' + escapeHtml(t.customerName) + '</b>' : '— 从顾客资料库选择 —'}</span>
+        <span class="cs-trigger-arrow">▼</span>
+      </div>
+      <div class="cs-panel" id="rvPickerPanel" style="display:none;">
+        <div class="cs-search-wrap">
+          <input class="cs-search-input" id="rvPickerSearch" type="text" placeholder="🔍 输入姓名/电话/痛点快速检索" oninput="rvFilterPicker(this.value)">
+        </div>
+        <div class="cs-list" id="rvPickerList">${rvRenderPickerList(archives)}</div>
+        <div class="cs-empty" id="rvPickerEmpty" style="display:none;">未找到匹配的顾客</div>
+      </div>
+    </div>
+    <div style="text-align:center;margin:10px 0;">
+      <span style="font-size:12px;color:var(--text-light);">或</span>
+      <button class="btn btn-sm btn-outline" onclick="rvToggleManual()" style="margin-left:6px;">➕ 手动临时新增顾客（自动归档进资料库）</button>
+    </div>
+    <div id="rvManualBox" style="display:none;">
+      <input class="input-field" id="rvNewName" placeholder="新顾客姓名 *" oninput="rvManualNameInput(this.value)">
+      <input class="input-field" id="rvNewContact" placeholder="联系电话 / 微信号">
+      <div id="rvManualHint" style="font-size:12px;color:#F44336;display:none;margin:-4px 0 8px;"></div>
+    </div>
+    <div class="section-title" style="font-size:13px;">2️⃣ 回访内容</div>
+    <input class="input-field" id="rvGoal" placeholder="回访目标（如：邀约到店做水光复购）" value="${t ? escapeHtml(t.goal || '') : ''}">
+    <textarea class="input-field" id="rvNeed" placeholder="回访需求（如：告知本月会员日活动，询问上次项目恢复情况）" rows="2">${t ? escapeHtml(t.need || '') : ''}</textarea>
+    <textarea class="input-field" id="rvFocus" placeholder="跟进重点（如：重点铺垫热玛吉升级，避开价格话题）" rows="2">${t ? escapeHtml(t.focus || '') : ''}</textarea>
+    <div class="section-title" style="font-size:13px;">3️⃣ 回访周期（完全自定义）</div>
+    <div class="rv-cycle-tabs" id="rvCycleTabs">
+      <div class="rv-cycle-tab ${window._rvCycle.unit === 'week' ? 'active' : ''}" data-cy="week" onclick="rvSetCycleUnit('week')">每周N次</div>
+      <div class="rv-cycle-tab ${window._rvCycle.unit === 'month' ? 'active' : ''}" data-cy="month" onclick="rvSetCycleUnit('month')">每月N次</div>
+      <div class="rv-cycle-tab ${window._rvCycle.unit === 'days' ? 'active' : ''}" data-cy="days" onclick="rvSetCycleUnit('days')">自定义间隔</div>
+    </div>
+    <div id="rvCycleCfg">${rvRenderCycleCfg()}</div>
+    <div class="section-title" style="font-size:13px;">4️⃣ 开始日期</div>
+    <input class="input-field" type="date" id="rvStartDate" value="${t ? (t.startDate || formatDate(new Date())) : formatDate(new Date())}">
+    <button class="btn btn-primary btn-full" onclick="saveRevisitTask(${t ? "'" + t.id + "'" : "''"})">💾 保存任务</button>
+    <div style="font-size:12px;color:var(--text-light);margin-top:8px;">💡 保存后系统按周期自动生成每周回访待办清单，逐条打勾完成，周视图可追溯历史</div>
+  `;
+  showModal(html);
+  setTimeout(() => {
+    document.addEventListener('click', function rvOutside(e) {
+      const wrap = document.getElementById('rvCustomerSelector');
+      if (!wrap) { document.removeEventListener('click', rvOutside, true); return; }
+      if (!wrap.contains(e.target)) {
+        const panel = document.getElementById('rvPickerPanel');
+        if (panel && panel.style.display !== 'none') rvTogglePicker(false);
+      }
+    }, true);
+  }, 100);
+}
+
+function rvRenderPickerList(customers) {
+  if (!customers || customers.length === 0) return '<div class="cs-list-empty">资料库暂无顾客</div>';
+  return customers.map(a => `
+    <div class="cs-item ${window._rvPickerSelected === a.id ? 'cs-item-selected' : ''}" data-cid="${a.id}" onclick="rvPickCustomer('${a.id}')">
+      <div class="cs-avatar">${escapeHtml((a.name || '?').slice(0, 1))}</div>
+      <div class="cs-info">
+        <div class="cs-name">${escapeHtml(a.name)}${a.contact ? ' <span class="cs-contact">' + escapeHtml(a.contact) + '</span>' : ''}</div>
+        <div class="cs-meta">
+          <span class="lib-badge ${a.source === 'system' ? 'lib-badge-sys' : 'lib-badge-lib'}">${a.source === 'system' ? '系统' : '资料库'}</span>
+          ${a.consultNotes ? '<span class="cs-tag-note">有痛点备注</span>' : ''}
+        </div>
+      </div>
+      <span class="cs-check">✓</span>
+    </div>
+  `).join('');
+}
+
+function rvTogglePicker(force) {
+  const panel = document.getElementById('rvPickerPanel');
+  const wrap = document.getElementById('rvCustomerSelector');
+  if (!panel) return;
+  const show = typeof force === 'boolean' ? force : (panel.style.display === 'none');
+  panel.style.display = show ? 'block' : 'none';
+  if (wrap) wrap.classList.toggle('cs-open', show);
+  if (show) {
+    const search = document.getElementById('rvPickerSearch');
+    if (search) { search.value = ''; rvFilterPicker(''); setTimeout(() => search.focus(), 50); }
+  }
+}
+
+function rvFilterPicker(keyword) {
+  const list = document.getElementById('rvPickerList');
+  const empty = document.getElementById('rvPickerEmpty');
+  if (!list) return;
+  const kw = (keyword || '').trim().toLowerCase();
+  const all = window._rvPickerCustomers || [];
+  const matched = !kw ? all : all.filter(a =>
+    (a.name || '').toLowerCase().includes(kw) ||
+    (a.contact || '').toLowerCase().includes(kw) ||
+    (a.consultNotes || '').toLowerCase().includes(kw) ||
+    (a.casualNotes || '').toLowerCase().includes(kw) ||
+    (a.projects || []).some(p => (p.name || '').toLowerCase().includes(kw))
+  );
+  list.innerHTML = rvRenderPickerList(matched);
+  if (empty) empty.style.display = matched.length === 0 ? 'block' : 'none';
+}
+
+function rvPickCustomer(aid) {
+  const a = (window._rvPickerCustomers || []).find(x => x.id === aid);
+  if (!a) return;
+  window._rvPickerSelected = aid;
+  const text = document.getElementById('rvTriggerText');
+  const trigger = document.getElementById('rvTrigger');
+  if (text) text.innerHTML = '<b>' + escapeHtml(a.name) + '</b>' + (a.contact ? ' <span style="color:var(--text-light);font-weight:400;">· ' + escapeHtml(a.contact) + '</span>' : '');
+  if (trigger) trigger.classList.remove('unselected');
+  rvTogglePicker(false);
+  document.querySelectorAll('#rvPickerList .cs-item').forEach(el => {
+    el.classList.toggle('cs-item-selected', el.dataset.cid === aid);
+  });
+  // 选了已有顾客就隐藏手动新增
+  const mb = document.getElementById('rvManualBox');
+  if (mb) mb.style.display = 'none';
+}
+
+function rvToggleManual() {
+  const mb = document.getElementById('rvManualBox');
+  if (!mb) return;
+  const show = mb.style.display === 'none';
+  mb.style.display = show ? 'block' : 'none';
+  if (show) {
+    window._rvPickerSelected = '';
+    const text = document.getElementById('rvTriggerText');
+    const trigger = document.getElementById('rvTrigger');
+    if (text) text.textContent = '— 将使用下方手动新增的顾客 —';
+    if (trigger) trigger.classList.add('unselected');
+    const nameInput = document.getElementById('rvNewName');
+    if (nameInput) setTimeout(() => nameInput.focus(), 50);
+  }
+}
+
+// 手动新增顾客与现有资料库同名检查（一人一档）
+function rvManualNameInput(val) {
+  const hint = document.getElementById('rvManualHint');
+  if (!hint) return;
+  const name = (val || '').trim();
+  if (!name) { hint.style.display = 'none'; return; }
+  const exist = getLibraryArchives().find(a => a.name === name);
+  if (exist) {
+    hint.style.display = 'block';
+    hint.textContent = '⚠️ 已存在同名档案「' + name + '」，保存时将自动归并使用现有档案';
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
+function rvSetCycleUnit(unit) {
+  window._rvCycle.unit = unit;
+  document.querySelectorAll('#rvCycleTabs .rv-cycle-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.cy === unit);
+  });
+  const cfg = document.getElementById('rvCycleCfg');
+  if (cfg) cfg.innerHTML = rvRenderCycleCfg();
+}
+
+function rvSetWeekTimes(val) {
+  window._rvCycle.times = parseInt(val, 10) || 1;
+}
+function rvToggleWeekDay(d, el) {
+  const wd = window._rvCycle.weekDays || (window._rvCycle.weekDays = []);
+  const idx = wd.indexOf(d);
+  if (idx >= 0) { wd.splice(idx, 1); el.classList.remove('active'); }
+  else { wd.push(d); el.classList.add('active'); }
+}
+function rvSetIntervalDays(val) {
+  window._rvCycle.intervalDays = Math.max(1, parseInt(val, 10) || 1);
+}
+
+function rvRenderCycleCfg() {
+  const cyc = window._rvCycle;
+  if (cyc.unit === 'week') {
+    const names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    let html = `
+      <div style="display:flex;align-items:center;gap:8px;margin:8px 0;">
+        <span style="font-size:13px;">每周</span>
+        <select class="input-field" style="width:70px;margin:0;" onchange="rvSetWeekTimes(this.value)">
+          ${[1,2,3,4,5,6,7].map(n => `<option value="${n}" ${(cyc.times || 1) === n ? 'selected' : ''}>${n}次</option>`).join('')}
+        </select>
+        <span style="font-size:13px;color:var(--text-light);">选择回访星期：</span>
+      </div>
+      <div class="rv-weekday-chips">
+        ${names.map((nm, i) => `<div class="rv-wd-chip ${((cyc.weekDays || []).indexOf(i + 1) >= 0) ? 'active' : ''}" onclick="rvToggleWeekDay(${i + 1}, this)">${nm}</div>`).join('')}
+      </div>
+      <div style="font-size:11px;color:var(--text-light);">💡 例：一周1次=只勾周一；一周3次=勾周一/周三/周五</div>
+    `;
+    return html;
+  }
+  if (cyc.unit === 'month') {
+    return `
+      <div style="display:flex;align-items:center;gap:8px;margin:8px 0;">
+        <span style="font-size:13px;">每月</span>
+        <select class="input-field" style="width:70px;margin:0;" onchange="rvSetWeekTimes(this.value)">
+          ${[1,2,3,4].map(n => `<option value="${n}" ${(cyc.times || 1) === n ? 'selected' : ''}>${n}次</option>`).join('')}
+        </select>
+        <span style="font-size:12px;color:var(--text-light);">自动均匀分布到当月（如每月3次≈10/20/30号）</span>
+      </div>
+    `;
+  }
+  return `
+    <div style="display:flex;align-items:center;gap:8px;margin:8px 0;">
+      <span style="font-size:13px;">每</span>
+      <input type="number" min="1" class="input-field" style="width:70px;margin:0;" value="${cyc.intervalDays || 7}" onchange="rvSetIntervalDays(this.value)">
+      <span style="font-size:13px;">天回访 1 次</span>
+    </div>
+    <div style="font-size:11px;color:var(--text-light);">💡 任意自定义循环频次，从开始日期起算</div>
+  `;
+}
+
+function saveRevisitTask(taskId) {
+  let customerId = window._rvPickerSelected || '';
+  let customerName = '';
+  const archives = getLibraryArchives();
+
+  // 方式一：从资料库选择
+  if (customerId) {
+    const a = archives.find(x => x.id === customerId);
+    if (!a) { showToast('所选顾客不存在，请重新选择'); return; }
+    customerName = a.name;
+  } else {
+    // 方式二：手动临时新增顾客（自动归档进资料库）
+    const name = document.getElementById('rvNewName') ? document.getElementById('rvNewName').value.trim() : '';
+    if (!name) { showToast('请先从资料库选择顾客，或手动新增顾客'); return; }
+    const contact = document.getElementById('rvNewContact') ? document.getElementById('rvNewContact').value.trim() : '';
+    // 一人一档：同名自动归并到现有档案
+    const exist = archives.find(a => a.name === name);
+    if (exist) {
+      customerId = exist.id;
+      customerName = exist.name;
+    } else {
+      const extra = Store.get('custLibExtra', []) || [];
+      const newId = 'L' + Date.now();
+      extra.push({ id: newId, name, contact, birthday: '', skinType: '', channel: '', notes: '', createdAt: formatDate(new Date()) });
+      Store.set('custLibExtra', extra);
+      customerId = newId;
+      customerName = name;
+      showToast('✅ 新顾客已自动归档进资料库');
+    }
+  }
+
+  const goal = document.getElementById('rvGoal').value.trim();
+  const need = document.getElementById('rvNeed').value.trim();
+  const focus = document.getElementById('rvFocus').value.trim();
+  const startDate = document.getElementById('rvStartDate').value || formatDate(new Date());
+  const cyc = window._rvCycle;
+  if (cyc.unit === 'week' && (!cyc.weekDays || cyc.weekDays.length === 0)) {
+    showToast('每周模式请至少选择一个回访星期'); return;
+  }
+  if (cyc.unit === 'days' && (!cyc.intervalDays || cyc.intervalDays < 1)) {
+    showToast('请填写有效的间隔天数'); return;
+  }
+
+  const tasks = Store.get('revisitTasks', []) || [];
+  if (taskId) {
+    const t = tasks.find(x => x.id === taskId);
+    if (t) {
+      t.customerId = customerId;
+      t.customerName = customerName;
+      t.goal = goal; t.need = need; t.focus = focus;
+      t.cycle = JSON.parse(JSON.stringify(cyc));
+      t.startDate = startDate;
+    }
+    Store.set('revisitTasks', tasks);
+    showToast('✅ 任务已更新');
+  } else {
+    tasks.push({
+      id: 'rt' + Date.now(),
+      customerId, customerName,
+      goal, need, focus,
+      cycle: JSON.parse(JSON.stringify(cyc)),
+      startDate,
+      createdAt: formatDateTime(new Date()),
+      paused: false
+    });
+    Store.set('revisitTasks', tasks);
+    speak('回访任务已创建');
+    showToast('✅ 回访任务已创建，每周待办将自动生成');
+  }
+  closeModal();
+  const view = document.getElementById('view-revisit');
+  if (view && currentView === 'revisit') { revisitWeekStart = rvGetWeekStart(new Date()); renderRevisitTasks(view); }
+}
+
+function rvTogglePause(tid) {
+  const tasks = Store.get('revisitTasks', []) || [];
+  const t = tasks.find(x => x.id === tid);
+  if (!t) return;
+  t.paused = !t.paused;
+  Store.set('revisitTasks', tasks);
+  showToast(t.paused ? '任务已暂停（不再生成待办）' : '任务已恢复');
+  const view = document.getElementById('view-revisit');
+  if (view && currentView === 'revisit') renderRevisitTasks(view);
+}
+
+function rvDeleteTask(tid) {
+  showConfirm('删除该回访任务？该任务已生成的历史完成记录将保留在顾客档案中可追溯。', '删除', () => {
+    let tasks = Store.get('revisitTasks', []) || [];
+    tasks = tasks.filter(x => x.id !== tid);
+    Store.set('revisitTasks', tasks);
+    closeModal();
+    showToast('已删除任务');
+    const view = document.getElementById('view-revisit');
+    if (view && currentView === 'revisit') renderRevisitTasks(view);
+  }, '取消');
+}
+
+// 历史回访记录追溯
+function showRevisitTaskHistory(tid) {
+  const tasks = (Store.get('revisitTasks', []) || []);
+  const t = tasks.find(x => x.id === tid);
+  if (!t) return;
+  const logs = Store.get('revisitLogs', {}) || {};
+  const hist = [];
+  Object.keys(logs).forEach(k => {
+    if (k.indexOf(t.id + '|') === 0 && logs[k] && logs[k].done) {
+      hist.push({ key: k, date: k.split('|')[1], log: logs[k] });
+    }
+  });
+  hist.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  // 未来4周预览
+  const upcoming = [];
+  for (let w = 0; w < 4; w++) {
+    const ws = rvAddDays(rvGetWeekStart(new Date()), w * 7);
+    rvGenerateWeekInstances(ws).filter(i => i.taskId === tid).forEach(i => upcoming.push(i.date));
+  }
+
+  const html = `
+    <div class="modal-header">
+      <div class="modal-title">📜 回访历史 · ${escapeHtml(t.customerName || '')}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">周期：${rvDescribeCycle(t.cycle)} · 开始日期 ${escapeHtml(t.startDate || '')}</div>
+    <div class="section-title">✅ 已完成（${hist.length} 次）</div>
+    ${hist.length === 0 ? '<div style="font-size:12px;color:var(--text-light);">暂无完成记录</div>' :
+      hist.map(h => `
+        <div class="lib-tl-item">
+          <div class="lib-tl-icon">📞</div>
+          <div class="lib-tl-body">
+            <div class="lib-tl-meta">${escapeHtml(h.date)} · 完成</div>
+            <div class="lib-tl-content">${h.log.note ? escapeHtml(h.log.note) : ''} <span style="color:var(--text-light);font-size:11px;">${escapeHtml(h.log.doneAt || '')}</span></div>
+          </div>
+        </div>
+      `).join('')}
+    <div class="section-title">📅 未来排期预览（近4周）</div>
+    ${upcoming.length === 0 ? '<div style="font-size:12px;color:var(--text-light);">近4周无排期</div>' :
+      '<div style="font-size:13px;line-height:2;">' + upcoming.map(d => '📆 ' + d).join('<br>') + '</div>'}
+  `;
+  showModal(html);
 }
 
 // ===== 启动 =====
