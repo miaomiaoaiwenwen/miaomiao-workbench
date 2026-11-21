@@ -745,6 +745,7 @@ function switchView(viewId) {
     case 'accounting': renderAccounting(view); break;
             case 'dashboard': renderDashboard(view); break;
     case 'settings': renderSettings(view); break;
+    case 'recordings': renderDaily(view); setTimeout(showQuickRecordingModal, 60); break;
   }
 }
 
@@ -839,10 +840,10 @@ function renderDaily(view) {
       <div class="quick-card-icon qc-purple">👥</div>
       <div class="quick-card-name">顾客跟进</div>
     </div>
-    <div class="quick-card quick-card-recording" onclick="showQuickRecordingModal()">
-      <div class="quick-card-icon qc-recording">🎙️</div>
-      <div class="quick-card-name">录音归档</div>
-      <div class="quick-card-badge">面诊录音→AI复盘</div>
+    <div class="quick-card" onclick="switchView('revisit')">
+      <div class="quick-card-icon qc-pink">🔁</div>
+      <div class="quick-card-name">周期回访</div>
+      <div class="quick-card-badge">今日待回访·一键打勾</div>
     </div>
     <div class="quick-card" onclick="switchView('consumption')">
       <div class="quick-card-icon qc-gold">💳</div>
