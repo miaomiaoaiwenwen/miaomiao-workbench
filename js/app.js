@@ -812,6 +812,9 @@ function renderDaily(view) {
     </div>`;
   }
 
+  // ===== 回访提醒（今日待回访 + 拖欠清单，极简回访模块） =====
+  html += buildRevisitHomeHtml();
+
   // ===== 备份状态条（每日提醒） =====
   const backupTime = localStorage.getItem(BACKUP_TIME_KEY);
   if (backupTime) {
@@ -5151,32 +5154,24 @@ function buildLibraryListHtml() {
   return html;
 }
 
-// 该顾客的周期回访完成总次数（从回访日志统计，只读）
+// 该顾客的周期回访打卡总次数（极简回访模块，按姓名与档案关联，只读统计）
 function getCustomerRevisitCount(aid) {
-  const logs = Store.get('revisitLogs', {}) || {};
-  const tasks = (Store.get('revisitTasks', []) || []).filter(t => t.customerId === aid);
-  const tIds = new Set(tasks.map(t => t.id));
-  let n = 0;
-  Object.keys(logs).forEach(k => {
-    const tid = k.split('|')[0];
-    if (tIds.has(tid) && logs[k] && logs[k].done) n++;
-  });
-  return n;
+  const a = getLibraryArchives().find(x => x.id === aid);
+  if (!a) return 0;
+  const done = rvGetDoneMap();
+  return rvGetRows().filter(r => r.name === a.name).reduce((n, r) => n + ((done[r.id]) || []).length, 0);
 }
 
 function getCustomerRevisitRecords(aid) {
-  const logs = Store.get('revisitLogs', {}) || {};
-  const tasks = (Store.get('revisitTasks', []) || []).filter(t => t.customerId === aid);
-  const tMap = {}; tasks.forEach(t => { tMap[t.id] = t; });
-  const records = [];
-  Object.keys(logs).forEach(k => {
-    const tid = k.split('|')[0];
-    if (tMap[tid] && logs[k] && logs[k].done) {
-      records.push({ date: k.split('|')[1], task: tMap[tid], log: logs[k] });
-    }
+  const a = getLibraryArchives().find(x => x.id === aid);
+  if (!a) return [];
+  const done = rvGetDoneMap();
+  const recs = [];
+  rvGetRows().filter(r => r.name === a.name).forEach(r => {
+    ((done[r.id]) || []).forEach(e => recs.push({ date: e.d, doneAt: e.at, cycle: r.cycle }));
   });
-  records.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  return records;
+  recs.sort((x, y) => (y.date || '').localeCompare(x.date || ''));
+  return recs;
 }
 
 // 一人一档：完整档案详情（系统数据只读展示 + 补充备注可写）
@@ -5195,13 +5190,7 @@ function showLibraryDetail(aid) {
   (a.projects || []).forEach(pr => timeline.push({ date: pr.date || '', icon: '📌', label: '铺垫项目' + (pr.completed ? '（已完成）' : ''), content: pr.name + (pr.thought ? ' · ' + pr.thought : '') }));
   notes.forEach(n => timeline.push({ date: n.date || '', icon: '🗒️', label: '档案补充备注', content: n.content || '' }));
   rvRecords.forEach(r => {
-    const t = r.task || {};
-    const parts = [];
-    if (t.goal) parts.push('🎯 ' + t.goal);
-    if (t.need) parts.push('📋 ' + t.need);
-    if (t.focus) parts.push('⭐ ' + t.focus);
-    if (r.log && r.log.note) parts.push('📝 ' + r.log.note);
-    timeline.push({ date: r.date, icon: '📞', label: '周期回访（' + rvDescribeCycle(t.cycle) + '）', content: parts.join('<br>') || '已完成回访' });
+    timeline.push({ date: r.date, icon: '📞', label: '周期回访（' + rvCycleLabel(r.cycle) + '）', content: '完成日期 ' + (r.doneAt || r.date) });
   });
   if (a.createdAt) timeline.push({ date: a.createdAt, icon: '📁', label: '建档', content: a.source === 'system' ? '由「顾客跟进」系统自动收录' : '资料库手动建档' });
   timeline.sort((x, y) => (y.date || '').localeCompare(x.date || ''));
@@ -5513,27 +5502,30 @@ function exportLibrarySingleCSV(aid) {
   showToast('✅ 单档案 CSV 已导出');
 }
 
-/* ==================== 二、周期性顾客回访任务 ==================== */
+/* ==================== 二、极简周期回访打卡（一行一位客户，一键打勾） ==================== */
 
-let revisitWeekStart = '';   // 周视图当前周（周一日期），空 = 本周
+// 独立存储键：rvRows（回访客户行）、rvDone（{rowId: [{d: 期望回访日期, at: 完成日期}]})
+// 旧键 revisitTasks / revisitLogs 原样保留在本地存储中，不读不写，零影响
+function rvGetRows() { return Store.get('rvRows', []) || []; }
+function rvGetDoneMap() { return Store.get('rvDone', {}) || {}; }
+function rvSaveDoneMap(m) { Store.set('rvDone', m); }
 
-function rvGetWeekStart(d) {
-  const dt = d ? new Date(typeof d === 'string' ? d + 'T00:00:00' : d) : new Date();
-  const day = (dt.getDay() + 6) % 7; // 周一=0
-  dt.setDate(dt.getDate() - day);
-  dt.setHours(0, 0, 0, 0);
-  return formatDate(dt);
+function rv2ParseCycle(val) {
+  if (!val) return { type: 'month', times: 2 };
+  return val[0] === 'm'
+    ? { type: 'month', times: Math.max(1, parseInt(val.slice(1), 10) || 2) }
+    : { type: 'week', weekday: Math.max(1, Math.min(7, parseInt(val.slice(1), 10) || 5)) };
 }
-function rvAddDays(dateKey, n) {
-  const dt = new Date(dateKey + 'T00:00:00');
-  dt.setDate(dt.getDate() + n);
-  return formatDate(dt);
+function rv2CycleValue(cyc) { return cyc && cyc.type === 'month' ? 'm' + cyc.times : 'w' + (cyc.weekday || 5); }
+
+function rvCycleLabel(cyc) {
+  if (!cyc) return '';
+  if (cyc.type === 'month') return '每月' + cyc.times + '次';
+  const names = { 1: '周一', 2: '周二', 3: '周三', 4: '周四', 5: '周五', 6: '周六', 7: '周日' };
+  return '每' + (names[cyc.weekday] || '');
 }
-function rvWeekLabel(startKey) {
-  const end = rvAddDays(startKey, 6);
-  return startKey.slice(5).replace('-', '/') + ' ~ ' + end.slice(5).replace('-', '/');
-}
-function rvIsThisWeek(startKey) { return startKey === rvGetWeekStart(new Date()); }
+
+function rvMonthKey(d) { return (d || todayKey()).slice(0, 7); }
 
 // 每月生成日：把 N 次均匀分布到当月（如每月3次 → 约 10/20/30 号附近）
 function rvMonthGeneratedDays(year, month0, times) {
@@ -5548,580 +5540,297 @@ function rvMonthGeneratedDays(year, month0, times) {
   return [...new Set(days)].sort((a, b) => a - b);
 }
 
-// 核心生成器：某一周的回访待办实例（纯计算，不写库；完成状态从 revisitLogs 读取）
-function rvGenerateWeekInstances(weekStart) {
-  const tasks = (Store.get('revisitTasks', []) || []).filter(t => !t.paused);
-  const logs = Store.get('revisitLogs', {}) || {};
-  const instances = [];
-  tasks.forEach(t => {
-    const cyc = t.cycle || { unit: 'week', times: 1, weekDays: [1] };
-    for (let i = 0; i < 7; i++) {
-      const dateKey = rvAddDays(weekStart, i);
-      if (t.startDate && dateKey < t.startDate) continue;
-      let seq = null;
-      const dt = new Date(dateKey + 'T00:00:00');
-      if (cyc.unit === 'week') {
-        let wd = Array.isArray(cyc.weekDays) && cyc.weekDays.length ? [...cyc.weekDays].sort((a, b) => a - b) : [];
-        if (!wd.length) {
-          // 未选星期时按次数均匀分布到一周
-          for (let k = 0; k < (cyc.times || 1); k++) wd.push(Math.max(1, Math.min(7, Math.round(((k + 1) * 7) / ((cyc.times || 1) + 1)))));
-          wd = [...new Set(wd)].sort((a, b) => a - b);
-        }
-        const jsDay = ((dt.getDay() + 6) % 7) + 1; // 1=周一 ... 7=周日
-        const idx = wd.indexOf(jsDay);
-        if (idx >= 0) seq = idx;
-      } else if (cyc.unit === 'month') {
-        const dayNums = rvMonthGeneratedDays(dt.getFullYear(), dt.getMonth(), cyc.times || 1);
-        const idx = dayNums.indexOf(dt.getDate());
-        if (idx >= 0) seq = idx;
-      } else { // 自定义间隔：每 N 天 1 次，从任务开始日期起算
-        const n = Math.max(1, parseInt(cyc.intervalDays, 10) || 1);
-        const base = new Date((t.startDate || todayKey()) + 'T00:00:00');
-        const diff = Math.floor((dt - base) / 86400000);
-        if (diff >= 0 && diff % n === 0) seq = 0;
-      }
-      if (seq !== null) {
-        const key = t.id + '|' + dateKey + '|' + seq;
-        const lg = logs[key];
-        instances.push({
-          key, taskId: t.id, task: t, date: dateKey, seq,
-          done: !!(lg && lg.done),
-          doneAt: (lg && lg.doneAt) || '',
-          note: (lg && lg.note) || ''
-        });
+// 本月期望回访日期（升序）：每月N次自动均匀分布；每周固定星期则取本月所有该星期
+function rvExpectedDatesThisMonth(row, monthKey) {
+  const parts = monthKey.split('-');
+  const y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const cyc = row.cycle || { type: 'month', times: 2 };
+  const dates = [];
+  if (cyc.type === 'month') {
+    rvMonthGeneratedDays(y, m - 1, cyc.times).forEach(dd => {
+      dates.push(monthKey + '-' + String(dd).padStart(2, '0'));
+    });
+  } else {
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dt = new Date(y, m - 1, d);
+      if (((dt.getDay() + 6) % 7) + 1 === cyc.weekday) {
+        dates.push(monthKey + '-' + String(d).padStart(2, '0'));
       }
     }
-  });
-  instances.sort((a, b) => a.date.localeCompare(b.date) || (a.task.customerName || '').localeCompare(b.task.customerName || '', 'zh-CN'));
-  return instances;
+  }
+  return dates;
 }
 
-function rvDescribeCycle(cyc) {
-  if (!cyc) return '每周1次';
-  if (cyc.unit === 'week') {
-    const names = { 1: '周一', 2: '周二', 3: '周三', 4: '周四', 5: '周五', 6: '周六', 7: '周日' };
-    let wd = (cyc.weekDays || []).map(d => names[d]).join('、');
-    if (!wd) wd = '自动分布';
-    return '每周' + (cyc.times || 1) + '次（' + wd + '）';
-  }
-  if (cyc.unit === 'month') return '每月' + (cyc.times || 1) + '次（自动均匀分布）';
-  return '每' + (cyc.intervalDays || 1) + '天1次';
+// 单行各次回访槽位状态：done 已完成 / today 今日到期 / overdue 超时拖欠 / future 未到期
+function rvRowSlots(row, monthKey) {
+  const expected = rvExpectedDatesThisMonth(row, monthKey);
+  const doneList = rvGetDoneMap()[row.id] || [];
+  const doneMap = {};
+  doneList.forEach(e => { doneMap[e.d] = e; });
+  const today = todayKey();
+  return expected.map(d => {
+    if (doneMap[d]) return { date: d, state: 'done', doneAt: doneMap[d].at || '' };
+    if (d < today) return { date: d, state: 'overdue', doneAt: '' };
+    if (d === today) return { date: d, state: 'today', doneAt: '' };
+    return { date: d, state: 'future', doneAt: '' };
+  });
 }
+
+function rvRowStats(row, monthKey) {
+  const slots = rvRowSlots(row, monthKey);
+  const doneCount = slots.filter(s => s.state === 'done').length;
+  const overdue = slots.filter(s => s.state === 'overdue').length;
+  const todayDue = slots.filter(s => s.state === 'today').length;
+  let state = 'ok';
+  if (overdue > 0) state = 'overdue';
+  else if (todayDue > 0) state = 'today';
+  return { total: slots.length, doneCount, overdue, todayDue, remaining: slots.length - doneCount, slots, state };
+}
+
+// 当月全局统计
+function rvMonthOverview(monthKey) {
+  const rows = rvGetRows();
+  let total = 0, done = 0;
+  const overdueRows = [], todayRows = [];
+  rows.forEach(r => {
+    const st = rvRowStats(r, monthKey);
+    total += st.total;
+    done += st.doneCount;
+    if (st.overdue > 0) overdueRows.push({ row: r, count: st.overdue });
+    if (st.todayDue > 0) todayRows.push({ row: r });
+  });
+  return { rows, total, done, overdueRows, todayRows };
+}
+
+function rv2Refresh() {
+  const v = document.getElementById('view-revisit');
+  if (v && currentView === 'revisit') renderRevisitTasks(v);
+  const d = document.getElementById('view-daily');
+  if (d && currentView === 'daily') renderDaily(d);
+}
+
+/* ---------- 回访主视图：表格一行一位客户 ---------- */
 
 function renderRevisitTasks(view) {
-  if (!revisitWeekStart) revisitWeekStart = rvGetWeekStart(new Date());
+  const monthKey = rvMonthKey();
+  const ov = rvMonthOverview(monthKey);
 
-  const instances = rvGenerateWeekInstances(revisitWeekStart);
-  const doneCount = instances.filter(i => i.done).length;
-  const undoneCount = instances.length - doneCount;
-  const pct = instances.length ? Math.round((doneCount / instances.length) * 100) : 0;
-  const tasks = (Store.get('revisitTasks', []) || []);
-
-  // 周完成率进度条
-  let html = `<div class="rv-summary">
-    <div class="rv-summary-top">
-      <div class="rv-week-nav">
-        <button class="rv-nav-btn" onclick="rvShiftWeek(-1)">‹</button>
-        <div class="rv-week-label" onclick="rvGoThisWeek()">
-          ${rvWeekLabel(revisitWeekStart)}${rvIsThisWeek(revisitWeekStart) ? ' <span class="rv-this-week">本周</span>' : ''}
-        </div>
-        <button class="rv-nav-btn" onclick="rvShiftWeek(1)">›</button>
-      </div>
+  let html = `<div class="rv2-summary">
+    <div class="rv2-summary-row">
+      <span>📋 本月应回访 <b>${ov.total}</b> 人次</span>
+      <span style="color:#2E7D32;">✅ 已互动 <b>${ov.done}</b></span>
+      <span style="color:${ov.overdueRows.length ? '#C62828' : 'var(--text-light)'};">⏰ 拖欠 <b>${ov.overdueRows.length}</b> 人</span>
     </div>
-    <div class="rv-summary-stats">
-      <span>📋 本周应回访 <b>${instances.length}</b> 人次</span>
-      <span style="color:#2E7D32;">✅ 已完成 <b>${doneCount}</b></span>
-      <span style="color:#C62828;">⏳ 未完成 <b>${undoneCount}</b></span>
-    </div>
-    <div class="rv-progress-track"><div class="rv-progress-fill" style="width:${pct}%;"></div></div>
-    <div style="font-size:11px;color:var(--text-light);text-align:right;">完成率 ${pct}%</div>
   </div>`;
 
-  // 周视图：按日期分组的待办清单
-  html += `<div class="section-title">📆 每周回访待办清单</div>`;
-  if (instances.length === 0) {
-    html += `<div class="empty-state"><div class="es-icon">🔁</div><div class="es-text">本周暂无回访待办<br><span style="font-size:11px;">点击下方「新建回访任务」开始自动排期</span></div></div>`;
-  } else {
-    const weeks = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-    const days = [...new Set(instances.map(i => i.date))].sort();
-    days.forEach(dk => {
-      const dt = new Date(dk + 'T00:00:00');
-      const isToday = dk === todayKey();
-      const dayItems = instances.filter(i => i.date === dk);
-      html += `<div class="rv-day-group">
-        <div class="rv-day-header">${dk.slice(5).replace('-', '/')} ${weeks[dt.getDay()]}${isToday ? ' <span class="rv-today-tag">今天</span>' : ''}
-          <span style="font-weight:400;color:var(--text-light);">（${dayItems.filter(i => i.done).length}/${dayItems.length} 已完成）</span>
-        </div>
-        ${dayItems.map(i => `
-          <div class="rv-item ${i.done ? 'rv-done' : ''}" onclick="showRevisitItemDetail('${i.key}')">
-            <div class="rv-check ${i.done ? 'checked' : ''}" onclick="event.stopPropagation();rvToggleDone('${i.key}')">${i.done ? '✓' : ''}</div>
-            <div class="rv-item-body">
-              <div class="rv-item-name">👤 ${escapeHtml(i.task.customerName || '未命名顾客')}</div>
-              <div class="rv-item-goal">${i.task.goal ? '🎯 ' + escapeHtml(i.task.goal) : ''}${i.task.need ? '　📋 ' + escapeHtml(i.task.need) : ''}</div>
-              <div class="rv-item-meta">${rvDescribeCycle(i.task.cycle)}${i.done ? ' · 完成于 ' + escapeHtml(i.doneAt) : ''}</div>
-            </div>
-            <div class="cust-activity-arrow">›</div>
-          </div>
-        `).join('')}
-      </div>`;
-    });
-  }
+  // 快速添加：一行搞定（姓名 + 周期 → 添加）
+  html += `<div class="rv2-addbar">
+    <input class="input-field rv2-add-name" id="rv2NewName" placeholder="客户姓名" onkeydown="if(event.key==='Enter')rv2AddRow()">
+    <select class="input-field rv2-add-cycle" id="rv2NewCycle">
+      <option value="m2">每月2次</option>
+      <option value="m3">每月3次</option>
+      <option value="w5">每周五</option>
+      <option value="w6">每周六</option>
+    </select>
+    <button class="btn btn-primary rv2-add-btn" onclick="rv2AddRow()">➕ 添加</button>
+  </div>`;
 
-  // 任务管理
-  html += `<div class="section-title">⚙️ 回访任务管理（${tasks.length}）</div>`;
-  if (tasks.length === 0) {
-    html += `<div style="font-size:12px;color:var(--text-light);margin-bottom:10px;">还没有回访任务，创建后系统将按周期自动生成每周待办清单</div>`;
+  html += `<div class="section-title">📇 回访客户（${ov.rows.length}）</div>`;
+  if (ov.rows.length === 0) {
+    html += `<div class="empty-state"><div class="es-icon">📞</div><div class="es-text">还没有回访客户<br><span style="font-size:11px;">上方输入姓名、选好周期，点「添加」即可</span></div></div>`;
   } else {
-    const thisWeek = rvGenerateWeekInstances(rvGetWeekStart(new Date()));
-    tasks.forEach(t => {
-      const tw = thisWeek.filter(i => i.taskId === t.id);
-      const twDone = tw.filter(i => i.done).length;
-      const arch = getLibraryArchives().find(a => a.id === t.customerId);
+    ov.rows.forEach(r => {
+      const st = rvRowStats(r, monthKey);
+      let badge = '';
+      if (st.overdue > 0) badge = `<span class="rv2-badge rv2-badge-overdue">拖欠${st.overdue}次</span>`;
+      else if (st.todayDue > 0) badge = `<span class="rv2-badge rv2-badge-today">今日待回访</span>`;
+      else if (st.remaining === 0) badge = `<span class="rv2-badge rv2-badge-ok">本月完成 ✅</span>`;
       html += `
-        <div class="rv-task-card ${t.paused ? 'rv-paused' : ''}">
-          <div class="rv-task-head">
-            <div class="rv-task-name">${t.paused ? '⏸️ ' : ''}👤 ${escapeHtml(t.customerName || '')}${arch ? '' : ' <span class="lib-badge lib-badge-gone">档案已删除</span>'}</div>
-            <div class="rv-task-cycle">${rvDescribeCycle(t.cycle)}</div>
+        <div class="rv2-row ${st.state === 'overdue' ? 'rv2-row-overdue' : ''}">
+          <div class="rv2-row-top">
+            <span class="rv2-row-name" onclick="rv2ShowHistory('${r.id}')">👤 ${escapeHtml(r.name)}</span>
+            <span class="rv2-cycle-tag">${rvCycleLabel(r.cycle)}</span>
+            ${badge}
+            <span class="rv2-row-actions">
+              <button class="rv2-mini-btn" onclick="rv2EditRow('${r.id}')">✏️</button>
+              <button class="rv2-mini-btn" onclick="rv2DelRow('${r.id}')">🗑</button>
+            </span>
           </div>
-          ${t.goal ? `<div class="rv-task-line">🎯 回访目标：${escapeHtml(t.goal)}</div>` : ''}
-          ${t.need ? `<div class="rv-task-line">📋 回访需求：${escapeHtml(t.need)}</div>` : ''}
-          ${t.focus ? `<div class="rv-task-line">⭐ 跟进重点：${escapeHtml(t.focus)}</div>` : ''}
-          <div class="rv-task-line" style="color:var(--text-light);">📅 开始日期 ${escapeHtml(t.startDate || '')} · 本周 ${twDone}/${tw.length}</div>
-          <div class="rv-task-actions">
-            <button class="btn btn-sm btn-outline" onclick="showRevisitTaskModal('${t.id}')">✏️ 编辑</button>
-            <button class="btn btn-sm btn-outline" onclick="rvTogglePause('${t.id}')">${t.paused ? '▶️ 恢复' : '⏸️ 暂停'}</button>
-            <button class="btn btn-sm btn-outline" onclick="showRevisitTaskHistory('${t.id}')">📜 历史</button>
-            <button class="btn btn-sm btn-outline" style="color:#E57373;border-color:#FFCDD2;" onclick="rvDeleteTask('${t.id}')">🗑</button>
+          <div class="rv2-row-progress">本月已互动 <b>${st.doneCount}</b>/${st.total}${st.remaining > 0 ? ' · 待完成 ' + st.remaining + ' 次' : ''}</div>
+          <div class="rv2-slots">
+            ${st.slots.map(s => {
+              if (s.state === 'done') {
+                return `<div class="rv2-slot rv2-slot-done" onclick="rv2SlotClick('${r.id}','${s.date}','done')" title="完成日期 ${s.doneAt}"><b>✓</b><span>${s.doneAt ? s.doneAt.slice(5) : ''}</span></div>`;
+              }
+              const mark = s.state === 'overdue' ? '!' : (s.state === 'today' ? '今' : '');
+              return `<div class="rv2-slot rv2-slot-${s.state}" onclick="rv2SlotClick('${r.id}','${s.date}','${s.state}')" title="应回访 ${s.date}"><b>${mark}</b><span>${s.date.slice(5)}</span></div>`;
+            }).join('')}
           </div>
         </div>
       `;
     });
   }
 
-  html += `<button class="btn btn-primary btn-full" style="margin-top:8px;" onclick="showRevisitTaskModal()">➕ 新建回访任务</button>`;
   view.innerHTML = html;
 }
 
-function rvShiftWeek(delta) {
-  revisitWeekStart = rvAddDays(revisitWeekStart, delta * 7);
-  const view = document.getElementById('view-revisit');
-  if (view) renderRevisitTasks(view);
-}
-function rvGoThisWeek() {
-  revisitWeekStart = rvGetWeekStart(new Date());
-  const view = document.getElementById('view-revisit');
-  if (view) renderRevisitTasks(view);
+// 新增客户：直接加一行，选好周期即可
+function rv2AddRow() {
+  const nameEl = document.getElementById('rv2NewName');
+  const cycEl = document.getElementById('rv2NewCycle');
+  if (!nameEl || !cycEl) return;
+  const name = nameEl.value.trim();
+  if (!name) { showToast('请输入客户姓名'); return; }
+  const cycle = rv2ParseCycle(cycEl.value);
+  const rows = rvGetRows();
+  if (rows.some(r => r.name === name)) { showToast('⚠️ 该客户已在回访列表中'); return; }
+  rows.push({ id: 'rv' + Date.now(), name, cycle, createdAt: formatDateTime(new Date()) });
+  Store.set('rvRows', rows);
+  nameEl.value = '';
+  speak('已添加');
+  showToast('✅ 已添加：' + name + '（' + rvCycleLabel(cycle) + '）');
+  rv2Refresh();
 }
 
-// 单次回访完成打勾（写入独立 revisitLogs，不碰任何原有数据）
-function rvToggleDone(key) {
-  const logs = Store.get('revisitLogs', {}) || {};
-  if (logs[key] && logs[key].done) {
-    delete logs[key];
-    Store.set('revisitLogs', logs);
+// 勾选某次回访 → 自动填充完成日期（今天）
+function rv2Check(rowId, date) {
+  const map = rvGetDoneMap();
+  if (!map[rowId]) map[rowId] = [];
+  if (map[rowId].some(e => e.d === date)) { showToast('该次已完成'); return; }
+  map[rowId].push({ d: date, at: todayKey() });
+  rvSaveDoneMap(map);
+  speak('回访完成');
+  showToast('✅ 已完成，完成日期 ' + todayKey());
+  rv2Refresh();
+}
+
+function rv2Uncheck(rowId, date) {
+  const map = rvGetDoneMap();
+  if (map[rowId]) {
+    map[rowId] = map[rowId].filter(e => e.d !== date);
+    if (map[rowId].length === 0) delete map[rowId];
+    rvSaveDoneMap(map);
     showToast('已取消完成标记');
-  } else {
-    logs[key] = { done: true, doneAt: formatDateTime(new Date()) };
-    Store.set('revisitLogs', logs);
-    speak('回访完成');
-    showToast('✅ 已标记完成');
+    rv2Refresh();
   }
-  const view = document.getElementById('view-revisit');
-  if (view && currentView === 'revisit') renderRevisitTasks(view);
 }
 
-function showRevisitItemDetail(key) {
-  const logs = Store.get('revisitLogs', {}) || {};
-  const parts = key.split('|');
-  const taskId = parts[0], date = parts[1], seq = parts[2];
-  const t = (Store.get('revisitTasks', []) || []).find(x => x.id === taskId);
-  if (!t) { showToast('任务不存在或已删除'); return; }
-  const lg = logs[key] || {};
-  const arch = getLibraryArchives().find(a => a.id === t.customerId);
+function rv2SlotClick(rowId, date, state) {
+  if (state === 'done') {
+    showConfirm('取消该次完成标记？', '取消标记', () => { rv2Uncheck(rowId, date); }, '保留');
+  } else {
+    rv2Check(rowId, date);
+  }
+}
+
+// 编辑：改姓名 / 改周期（小弹窗，仅两个选项）
+function rv2EditRow(rowId) {
+  const r = rvGetRows().find(x => x.id === rowId);
+  if (!r) return;
   const html = `
     <div class="modal-header">
-      <div class="modal-title">📞 回访详情 · ${escapeHtml(t.customerName || '')}</div>
+      <div class="modal-title">✏️ 编辑回访客户</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <div class="lib-detail-grid" style="margin-bottom:10px;">
-      <div class="ldg-item"><span class="ldg-label">回访日期</span><span>${escapeHtml(date)}</span></div>
-      <div class="ldg-item"><span class="ldg-label">回访周期</span><span>${rvDescribeCycle(t.cycle)}</span></div>
-      <div class="ldg-item"><span class="ldg-label">完成状态</span><span>${lg.done ? '✅ 已完成（' + escapeHtml(lg.doneAt || '') + '）' : '⏳ 未完成'}</span></div>
-    </div>
-    ${t.goal ? `<div class="lib-note-block"><div class="lib-note-title">🎯 回访目标</div><div class="lib-note-content">${escapeHtml(t.goal)}</div></div>` : ''}
-    ${t.need ? `<div class="lib-note-block"><div class="lib-note-title">📋 回访需求</div><div class="lib-note-content">${escapeHtml(t.need)}</div></div>` : ''}
-    ${t.focus ? `<div class="lib-note-block"><div class="lib-note-title">⭐ 跟进重点</div><div class="lib-note-content">${escapeHtml(t.focus)}</div></div>` : ''}
-    <button class="btn btn-primary btn-full" onclick="rvToggleDone('${key}');closeModal();">${lg.done ? '↩️ 取消完成标记' : '✅ 标记本次回访完成'}</button>
-    ${arch ? `<button class="btn btn-outline btn-full" style="margin-top:8px;" onclick="closeModal();showLibraryDetail('${arch.id}')">🗂️ 查看顾客完整档案</button>` : ''}
+    <input class="input-field" id="rv2EditName" value="${escapeHtml(r.name)}" placeholder="客户姓名">
+    <select class="input-field" id="rv2EditCycle">
+      <option value="m2" ${rv2CycleValue(r.cycle) === 'm2' ? 'selected' : ''}>每月2次</option>
+      <option value="m3" ${rv2CycleValue(r.cycle) === 'm3' ? 'selected' : ''}>每月3次</option>
+      <option value="w5" ${rv2CycleValue(r.cycle) === 'w5' ? 'selected' : ''}>每周五</option>
+      <option value="w6" ${rv2CycleValue(r.cycle) === 'w6' ? 'selected' : ''}>每周六</option>
+    </select>
+    <button class="btn btn-primary btn-full" onclick="rv2SaveRow('${rowId}')">保存</button>
   `;
   showModal(html);
 }
 
-/* ---------- 回访任务新建/编辑（资料库选人 + 手动建档 两种方式） ---------- */
-
-function showRevisitTaskModal(taskId) {
-  const tasks = (Store.get('revisitTasks', []) || []);
-  const t = taskId ? tasks.find(x => x.id === taskId) : null;
-  const archives = getLibraryArchives();
-  window._rvPickerCustomers = archives;
-  window._rvPickerSelected = t ? t.customerId : '';
-  window._rvCycle = t ? JSON.parse(JSON.stringify(t.cycle)) : { unit: 'week', times: 1, weekDays: [1], intervalDays: 7 };
-
-  const html = `
-    <div class="modal-header">
-      <div class="modal-title">${t ? '✏️ 编辑回访任务' : '➕ 新建回访任务'}</div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="section-title" style="font-size:13px;">1️⃣ 选择顾客（支持搜索检索资料库）</div>
-    <div class="customer-selector" id="rvCustomerSelector">
-      <div class="cs-trigger ${window._rvPickerSelected ? '' : 'unselected'}" id="rvTrigger" onclick="rvTogglePicker()">
-        <span class="cs-trigger-icon">👤</span>
-        <span class="cs-trigger-text" id="rvTriggerText">${t ? '<b>' + escapeHtml(t.customerName) + '</b>' : '— 从顾客资料库选择 —'}</span>
-        <span class="cs-trigger-arrow">▼</span>
-      </div>
-      <div class="cs-panel" id="rvPickerPanel" style="display:none;">
-        <div class="cs-search-wrap">
-          <input class="cs-search-input" id="rvPickerSearch" type="text" placeholder="🔍 输入姓名/电话/痛点快速检索" oninput="rvFilterPicker(this.value)">
-        </div>
-        <div class="cs-list" id="rvPickerList">${rvRenderPickerList(archives)}</div>
-        <div class="cs-empty" id="rvPickerEmpty" style="display:none;">未找到匹配的顾客</div>
-      </div>
-    </div>
-    <div style="text-align:center;margin:10px 0;">
-      <span style="font-size:12px;color:var(--text-light);">或</span>
-      <button class="btn btn-sm btn-outline" onclick="rvToggleManual()" style="margin-left:6px;">➕ 手动临时新增顾客（自动归档进资料库）</button>
-    </div>
-    <div id="rvManualBox" style="display:none;">
-      <input class="input-field" id="rvNewName" placeholder="新顾客姓名 *" oninput="rvManualNameInput(this.value)">
-      <input class="input-field" id="rvNewContact" placeholder="联系电话 / 微信号">
-      <div id="rvManualHint" style="font-size:12px;color:#F44336;display:none;margin:-4px 0 8px;"></div>
-    </div>
-    <div class="section-title" style="font-size:13px;">2️⃣ 回访内容</div>
-    <input class="input-field" id="rvGoal" placeholder="回访目标（如：邀约到店做水光复购）" value="${t ? escapeHtml(t.goal || '') : ''}">
-    <textarea class="input-field" id="rvNeed" placeholder="回访需求（如：告知本月会员日活动，询问上次项目恢复情况）" rows="2">${t ? escapeHtml(t.need || '') : ''}</textarea>
-    <textarea class="input-field" id="rvFocus" placeholder="跟进重点（如：重点铺垫热玛吉升级，避开价格话题）" rows="2">${t ? escapeHtml(t.focus || '') : ''}</textarea>
-    <div class="section-title" style="font-size:13px;">3️⃣ 回访周期（完全自定义）</div>
-    <div class="rv-cycle-tabs" id="rvCycleTabs">
-      <div class="rv-cycle-tab ${window._rvCycle.unit === 'week' ? 'active' : ''}" data-cy="week" onclick="rvSetCycleUnit('week')">每周N次</div>
-      <div class="rv-cycle-tab ${window._rvCycle.unit === 'month' ? 'active' : ''}" data-cy="month" onclick="rvSetCycleUnit('month')">每月N次</div>
-      <div class="rv-cycle-tab ${window._rvCycle.unit === 'days' ? 'active' : ''}" data-cy="days" onclick="rvSetCycleUnit('days')">自定义间隔</div>
-    </div>
-    <div id="rvCycleCfg">${rvRenderCycleCfg()}</div>
-    <div class="section-title" style="font-size:13px;">4️⃣ 开始日期</div>
-    <input class="input-field" type="date" id="rvStartDate" value="${t ? (t.startDate || formatDate(new Date())) : formatDate(new Date())}">
-    <button class="btn btn-primary btn-full" onclick="saveRevisitTask(${t ? "'" + t.id + "'" : "''"})">💾 保存任务</button>
-    <div style="font-size:12px;color:var(--text-light);margin-top:8px;">💡 保存后系统按周期自动生成每周回访待办清单，逐条打勾完成，周视图可追溯历史</div>
-  `;
-  showModal(html);
-  setTimeout(() => {
-    document.addEventListener('click', function rvOutside(e) {
-      const wrap = document.getElementById('rvCustomerSelector');
-      if (!wrap) { document.removeEventListener('click', rvOutside, true); return; }
-      if (!wrap.contains(e.target)) {
-        const panel = document.getElementById('rvPickerPanel');
-        if (panel && panel.style.display !== 'none') rvTogglePicker(false);
-      }
-    }, true);
-  }, 100);
-}
-
-function rvRenderPickerList(customers) {
-  if (!customers || customers.length === 0) return '<div class="cs-list-empty">资料库暂无顾客</div>';
-  return customers.map(a => `
-    <div class="cs-item ${window._rvPickerSelected === a.id ? 'cs-item-selected' : ''}" data-cid="${a.id}" onclick="rvPickCustomer('${a.id}')">
-      <div class="cs-avatar">${escapeHtml((a.name || '?').slice(0, 1))}</div>
-      <div class="cs-info">
-        <div class="cs-name">${escapeHtml(a.name)}${a.contact ? ' <span class="cs-contact">' + escapeHtml(a.contact) + '</span>' : ''}</div>
-        <div class="cs-meta">
-          <span class="lib-badge ${a.source === 'system' ? 'lib-badge-sys' : 'lib-badge-lib'}">${a.source === 'system' ? '系统' : '资料库'}</span>
-          ${a.consultNotes ? '<span class="cs-tag-note">有痛点备注</span>' : ''}
-        </div>
-      </div>
-      <span class="cs-check">✓</span>
-    </div>
-  `).join('');
-}
-
-function rvTogglePicker(force) {
-  const panel = document.getElementById('rvPickerPanel');
-  const wrap = document.getElementById('rvCustomerSelector');
-  if (!panel) return;
-  const show = typeof force === 'boolean' ? force : (panel.style.display === 'none');
-  panel.style.display = show ? 'block' : 'none';
-  if (wrap) wrap.classList.toggle('cs-open', show);
-  if (show) {
-    const search = document.getElementById('rvPickerSearch');
-    if (search) { search.value = ''; rvFilterPicker(''); setTimeout(() => search.focus(), 50); }
-  }
-}
-
-function rvFilterPicker(keyword) {
-  const list = document.getElementById('rvPickerList');
-  const empty = document.getElementById('rvPickerEmpty');
-  if (!list) return;
-  const kw = (keyword || '').trim().toLowerCase();
-  const all = window._rvPickerCustomers || [];
-  const matched = !kw ? all : all.filter(a =>
-    (a.name || '').toLowerCase().includes(kw) ||
-    (a.contact || '').toLowerCase().includes(kw) ||
-    (a.consultNotes || '').toLowerCase().includes(kw) ||
-    (a.casualNotes || '').toLowerCase().includes(kw) ||
-    (a.projects || []).some(p => (p.name || '').toLowerCase().includes(kw))
-  );
-  list.innerHTML = rvRenderPickerList(matched);
-  if (empty) empty.style.display = matched.length === 0 ? 'block' : 'none';
-}
-
-function rvPickCustomer(aid) {
-  const a = (window._rvPickerCustomers || []).find(x => x.id === aid);
-  if (!a) return;
-  window._rvPickerSelected = aid;
-  const text = document.getElementById('rvTriggerText');
-  const trigger = document.getElementById('rvTrigger');
-  if (text) text.innerHTML = '<b>' + escapeHtml(a.name) + '</b>' + (a.contact ? ' <span style="color:var(--text-light);font-weight:400;">· ' + escapeHtml(a.contact) + '</span>' : '');
-  if (trigger) trigger.classList.remove('unselected');
-  rvTogglePicker(false);
-  document.querySelectorAll('#rvPickerList .cs-item').forEach(el => {
-    el.classList.toggle('cs-item-selected', el.dataset.cid === aid);
-  });
-  // 选了已有顾客就隐藏手动新增
-  const mb = document.getElementById('rvManualBox');
-  if (mb) mb.style.display = 'none';
-}
-
-function rvToggleManual() {
-  const mb = document.getElementById('rvManualBox');
-  if (!mb) return;
-  const show = mb.style.display === 'none';
-  mb.style.display = show ? 'block' : 'none';
-  if (show) {
-    window._rvPickerSelected = '';
-    const text = document.getElementById('rvTriggerText');
-    const trigger = document.getElementById('rvTrigger');
-    if (text) text.textContent = '— 将使用下方手动新增的顾客 —';
-    if (trigger) trigger.classList.add('unselected');
-    const nameInput = document.getElementById('rvNewName');
-    if (nameInput) setTimeout(() => nameInput.focus(), 50);
-  }
-}
-
-// 手动新增顾客与现有资料库同名检查（一人一档）
-function rvManualNameInput(val) {
-  const hint = document.getElementById('rvManualHint');
-  if (!hint) return;
-  const name = (val || '').trim();
-  if (!name) { hint.style.display = 'none'; return; }
-  const exist = getLibraryArchives().find(a => a.name === name);
-  if (exist) {
-    hint.style.display = 'block';
-    hint.textContent = '⚠️ 已存在同名档案「' + name + '」，保存时将自动归并使用现有档案';
-  } else {
-    hint.style.display = 'none';
-  }
-}
-
-function rvSetCycleUnit(unit) {
-  window._rvCycle.unit = unit;
-  document.querySelectorAll('#rvCycleTabs .rv-cycle-tab').forEach(el => {
-    el.classList.toggle('active', el.dataset.cy === unit);
-  });
-  const cfg = document.getElementById('rvCycleCfg');
-  if (cfg) cfg.innerHTML = rvRenderCycleCfg();
-}
-
-function rvSetWeekTimes(val) {
-  window._rvCycle.times = parseInt(val, 10) || 1;
-}
-function rvToggleWeekDay(d, el) {
-  const wd = window._rvCycle.weekDays || (window._rvCycle.weekDays = []);
-  const idx = wd.indexOf(d);
-  if (idx >= 0) { wd.splice(idx, 1); el.classList.remove('active'); }
-  else { wd.push(d); el.classList.add('active'); }
-}
-function rvSetIntervalDays(val) {
-  window._rvCycle.intervalDays = Math.max(1, parseInt(val, 10) || 1);
-}
-
-function rvRenderCycleCfg() {
-  const cyc = window._rvCycle;
-  if (cyc.unit === 'week') {
-    const names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-    let html = `
-      <div style="display:flex;align-items:center;gap:8px;margin:8px 0;">
-        <span style="font-size:13px;">每周</span>
-        <select class="input-field" style="width:70px;margin:0;" onchange="rvSetWeekTimes(this.value)">
-          ${[1,2,3,4,5,6,7].map(n => `<option value="${n}" ${(cyc.times || 1) === n ? 'selected' : ''}>${n}次</option>`).join('')}
-        </select>
-        <span style="font-size:13px;color:var(--text-light);">选择回访星期：</span>
-      </div>
-      <div class="rv-weekday-chips">
-        ${names.map((nm, i) => `<div class="rv-wd-chip ${((cyc.weekDays || []).indexOf(i + 1) >= 0) ? 'active' : ''}" onclick="rvToggleWeekDay(${i + 1}, this)">${nm}</div>`).join('')}
-      </div>
-      <div style="font-size:11px;color:var(--text-light);">💡 例：一周1次=只勾周一；一周3次=勾周一/周三/周五</div>
-    `;
-    return html;
-  }
-  if (cyc.unit === 'month') {
-    return `
-      <div style="display:flex;align-items:center;gap:8px;margin:8px 0;">
-        <span style="font-size:13px;">每月</span>
-        <select class="input-field" style="width:70px;margin:0;" onchange="rvSetWeekTimes(this.value)">
-          ${[1,2,3,4].map(n => `<option value="${n}" ${(cyc.times || 1) === n ? 'selected' : ''}>${n}次</option>`).join('')}
-        </select>
-        <span style="font-size:12px;color:var(--text-light);">自动均匀分布到当月（如每月3次≈10/20/30号）</span>
-      </div>
-    `;
-  }
-  return `
-    <div style="display:flex;align-items:center;gap:8px;margin:8px 0;">
-      <span style="font-size:13px;">每</span>
-      <input type="number" min="1" class="input-field" style="width:70px;margin:0;" value="${cyc.intervalDays || 7}" onchange="rvSetIntervalDays(this.value)">
-      <span style="font-size:13px;">天回访 1 次</span>
-    </div>
-    <div style="font-size:11px;color:var(--text-light);">💡 任意自定义循环频次，从开始日期起算</div>
-  `;
-}
-
-function saveRevisitTask(taskId) {
-  let customerId = window._rvPickerSelected || '';
-  let customerName = '';
-  const archives = getLibraryArchives();
-
-  // 方式一：从资料库选择
-  if (customerId) {
-    const a = archives.find(x => x.id === customerId);
-    if (!a) { showToast('所选顾客不存在，请重新选择'); return; }
-    customerName = a.name;
-  } else {
-    // 方式二：手动临时新增顾客（自动归档进资料库）
-    const name = document.getElementById('rvNewName') ? document.getElementById('rvNewName').value.trim() : '';
-    if (!name) { showToast('请先从资料库选择顾客，或手动新增顾客'); return; }
-    const contact = document.getElementById('rvNewContact') ? document.getElementById('rvNewContact').value.trim() : '';
-    // 一人一档：同名自动归并到现有档案
-    const exist = archives.find(a => a.name === name);
-    if (exist) {
-      customerId = exist.id;
-      customerName = exist.name;
-    } else {
-      const extra = Store.get('custLibExtra', []) || [];
-      const newId = 'L' + Date.now();
-      extra.push({ id: newId, name, contact, birthday: '', skinType: '', channel: '', notes: '', createdAt: formatDate(new Date()) });
-      Store.set('custLibExtra', extra);
-      customerId = newId;
-      customerName = name;
-      showToast('✅ 新顾客已自动归档进资料库');
-    }
-  }
-
-  const goal = document.getElementById('rvGoal').value.trim();
-  const need = document.getElementById('rvNeed').value.trim();
-  const focus = document.getElementById('rvFocus').value.trim();
-  const startDate = document.getElementById('rvStartDate').value || formatDate(new Date());
-  const cyc = window._rvCycle;
-  if (cyc.unit === 'week' && (!cyc.weekDays || cyc.weekDays.length === 0)) {
-    showToast('每周模式请至少选择一个回访星期'); return;
-  }
-  if (cyc.unit === 'days' && (!cyc.intervalDays || cyc.intervalDays < 1)) {
-    showToast('请填写有效的间隔天数'); return;
-  }
-
-  const tasks = Store.get('revisitTasks', []) || [];
-  if (taskId) {
-    const t = tasks.find(x => x.id === taskId);
-    if (t) {
-      t.customerId = customerId;
-      t.customerName = customerName;
-      t.goal = goal; t.need = need; t.focus = focus;
-      t.cycle = JSON.parse(JSON.stringify(cyc));
-      t.startDate = startDate;
-    }
-    Store.set('revisitTasks', tasks);
-    showToast('✅ 任务已更新');
-  } else {
-    tasks.push({
-      id: 'rt' + Date.now(),
-      customerId, customerName,
-      goal, need, focus,
-      cycle: JSON.parse(JSON.stringify(cyc)),
-      startDate,
-      createdAt: formatDateTime(new Date()),
-      paused: false
-    });
-    Store.set('revisitTasks', tasks);
-    speak('回访任务已创建');
-    showToast('✅ 回访任务已创建，每周待办将自动生成');
-  }
+function rv2SaveRow(rowId) {
+  const rows = rvGetRows();
+  const r = rows.find(x => x.id === rowId);
+  if (!r) return;
+  const name = document.getElementById('rv2EditName').value.trim();
+  if (!name) { showToast('请输入客户姓名'); return; }
+  r.name = name;
+  r.cycle = rv2ParseCycle(document.getElementById('rv2EditCycle').value);
+  Store.set('rvRows', rows);
   closeModal();
-  const view = document.getElementById('view-revisit');
-  if (view && currentView === 'revisit') { revisitWeekStart = rvGetWeekStart(new Date()); renderRevisitTasks(view); }
+  showToast('✅ 已保存');
+  rv2Refresh();
 }
 
-function rvTogglePause(tid) {
-  const tasks = Store.get('revisitTasks', []) || [];
-  const t = tasks.find(x => x.id === tid);
-  if (!t) return;
-  t.paused = !t.paused;
-  Store.set('revisitTasks', tasks);
-  showToast(t.paused ? '任务已暂停（不再生成待办）' : '任务已恢复');
-  const view = document.getElementById('view-revisit');
-  if (view && currentView === 'revisit') renderRevisitTasks(view);
-}
-
-function rvDeleteTask(tid) {
-  showConfirm('删除该回访任务？该任务已生成的历史完成记录将保留在顾客档案中可追溯。', '删除', () => {
-    let tasks = Store.get('revisitTasks', []) || [];
-    tasks = tasks.filter(x => x.id !== tid);
-    Store.set('revisitTasks', tasks);
+function rv2DelRow(rowId) {
+  showConfirm('从回访列表删除该客户？（打卡记录随之清除，不影响顾客资料库任何数据）', '删除', () => {
+    let rows = rvGetRows();
+    rows = rows.filter(x => x.id !== rowId);
+    Store.set('rvRows', rows);
+    const done = rvGetDoneMap();
+    if (done[rowId]) { delete done[rowId]; rvSaveDoneMap(done); }
     closeModal();
-    showToast('已删除任务');
-    const view = document.getElementById('view-revisit');
-    if (view && currentView === 'revisit') renderRevisitTasks(view);
+    showToast('已删除');
+    rv2Refresh();
   }, '取消');
 }
 
-// 历史回访记录追溯
-function showRevisitTaskHistory(tid) {
-  const tasks = (Store.get('revisitTasks', []) || []);
-  const t = tasks.find(x => x.id === tid);
-  if (!t) return;
-  const logs = Store.get('revisitLogs', {}) || {};
-  const hist = [];
-  Object.keys(logs).forEach(k => {
-    if (k.indexOf(t.id + '|') === 0 && logs[k] && logs[k].done) {
-      hist.push({ key: k, date: k.split('|')[1], log: logs[k] });
-    }
-  });
-  hist.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-
-  // 未来4周预览
-  const upcoming = [];
-  for (let w = 0; w < 4; w++) {
-    const ws = rvAddDays(rvGetWeekStart(new Date()), w * 7);
-    rvGenerateWeekInstances(ws).filter(i => i.taskId === tid).forEach(i => upcoming.push(i.date));
-  }
-
+// 点击客户名：查看该客户回访记录（可追溯）
+function rv2ShowHistory(rowId) {
+  const r = rvGetRows().find(x => x.id === rowId);
+  if (!r) return;
+  const monthKey = rvMonthKey();
+  const st = rvRowStats(r, monthKey);
+  const doneList = (rvGetDoneMap()[rowId] || []).slice().sort((a, b) => (b.d || '').localeCompare(a.d || ''));
+  const stateNames = { done: '✅ 已完成', today: '🔔 今日到期', overdue: '🚨 拖欠', future: '⏳ 未到期' };
   const html = `
     <div class="modal-header">
-      <div class="modal-title">📜 回访历史 · ${escapeHtml(t.customerName || '')}</div>
+      <div class="modal-title">📞 ${escapeHtml(r.name)} · ${rvCycleLabel(r.cycle)}</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">周期：${rvDescribeCycle(t.cycle)} · 开始日期 ${escapeHtml(t.startDate || '')}</div>
-    <div class="section-title">✅ 已完成（${hist.length} 次）</div>
-    ${hist.length === 0 ? '<div style="font-size:12px;color:var(--text-light);">暂无完成记录</div>' :
-      hist.map(h => `
-        <div class="lib-tl-item">
-          <div class="lib-tl-icon">📞</div>
-          <div class="lib-tl-body">
-            <div class="lib-tl-meta">${escapeHtml(h.date)} · 完成</div>
-            <div class="lib-tl-content">${h.log.note ? escapeHtml(h.log.note) : ''} <span style="color:var(--text-light);font-size:11px;">${escapeHtml(h.log.doneAt || '')}</span></div>
-          </div>
-        </div>
-      `).join('')}
-    <div class="section-title">📅 未来排期预览（近4周）</div>
-    ${upcoming.length === 0 ? '<div style="font-size:12px;color:var(--text-light);">近4周无排期</div>' :
-      '<div style="font-size:13px;line-height:2;">' + upcoming.map(d => '📆 ' + d).join('<br>') + '</div>'}
+    <div class="section-title">📅 本月排期</div>
+    ${st.slots.map(s => `<div class="lib-tl-item"><div class="lib-tl-icon">${s.state === 'done' ? '✅' : '📆'}</div><div class="lib-tl-body"><div class="lib-tl-meta">${s.date} · ${stateNames[s.state]}</div><div class="lib-tl-content">${s.state === 'done' ? '完成日期 ' + (s.doneAt || s.date) : ''}</div></div></div>`).join('')}
+    <div class="section-title">📜 历史完成记录（${doneList.length} 次）</div>
+    ${doneList.length === 0 ? '<div style="font-size:12px;color:var(--text-light);">暂无完成记录</div>' :
+      doneList.map(e => `<div style="font-size:13px;line-height:2;">✅ 应回访 ${e.d} · 完成于 ${e.at}</div>`).join('')}
   `;
   showModal(html);
+}
+
+/* ---------- 首页集中展示：今日待回访 + 拖欠清单 ---------- */
+
+function buildRevisitHomeHtml() {
+  const ov = rvMonthOverview(rvMonthKey());
+  if (ov.todayRows.length === 0 && ov.overdueRows.length === 0) return '';
+  let html = `<div class="rv2-home-card">
+    <div class="rv2-home-title">📞 回访提醒</div>`;
+  if (ov.todayRows.length > 0) {
+    html += `<div class="rv2-home-label" style="color:#E0608E;">🔔 今日待回访（${ov.todayRows.length}）</div>`;
+    html += ov.todayRows.map(o => `
+      <div class="rv2-home-item">
+        <span class="rv2-home-name">👤 ${escapeHtml(o.row.name)} <span class="rv2-cycle-tag">${rvCycleLabel(o.row.cycle)}</span></span>
+        <button class="btn btn-sm btn-primary" onclick="rv2HomeCheck('${o.row.id}')">✅ 打勾</button>
+      </div>
+    `).join('');
+  }
+  if (ov.overdueRows.length > 0) {
+    html += `<div class="rv2-home-label" style="color:#C62828;margin-top:8px;">🚨 拖欠清单（${ov.overdueRows.length}）</div>`;
+    html += ov.overdueRows.map(o => `
+      <div class="rv2-home-item rv2-home-item-overdue">
+        <span class="rv2-home-name">👤 ${escapeHtml(o.row.name)} <span style="color:#C62828;font-size:11px;">拖欠${o.count}次</span></span>
+        <button class="btn btn-sm btn-outline" onclick="rv2HomeCheck('${o.row.id}')">✅ 补打卡</button>
+      </div>
+    `).join('');
+  }
+  html += `</div>`;
+  return html;
+}
+
+// 首页一键打勾：优先补拖欠，其次今日待办
+function rv2HomeCheck(rowId) {
+  const r = rvGetRows().find(x => x.id === rowId);
+  if (!r) return;
+  const slots = rvRowSlots(r, rvMonthKey());
+  const target = slots.find(s => s.state === 'overdue') || slots.find(s => s.state === 'today');
+  if (!target) { showToast('本月暂无待回访'); return; }
+  rv2Check(rowId, target.date);
 }
 
 // ===== 启动 =====
