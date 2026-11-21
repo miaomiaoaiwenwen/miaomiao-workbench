@@ -5690,8 +5690,13 @@ function showRv2PickerModal() {
       <select class="input-field rv2-add-cycle" id="rv2PickCycle" style="flex:2;margin:0 !important;">
         <option value="m2">每月2次</option>
         <option value="m3">每月3次</option>
+        <option value="w1">每周一</option>
+        <option value="w2">每周二</option>
+        <option value="w3">每周三</option>
+        <option value="w4">每周四</option>
         <option value="w5">每周五</option>
         <option value="w6">每周六</option>
+        <option value="w7">每周日</option>
       </select>
       <button class="btn btn-primary" style="flex:1;" onclick="rv2PickerConfirm()">✅ 加入回访清单</button>
     </div>
@@ -5834,8 +5839,13 @@ function rv2EditRow(rowId) {
     <select class="input-field" id="rv2EditCycle">
       <option value="m2" ${rv2CycleValue(r.cycle) === 'm2' ? 'selected' : ''}>每月2次</option>
       <option value="m3" ${rv2CycleValue(r.cycle) === 'm3' ? 'selected' : ''}>每月3次</option>
+      <option value="w1" ${rv2CycleValue(r.cycle) === 'w1' ? 'selected' : ''}>每周一</option>
+      <option value="w2" ${rv2CycleValue(r.cycle) === 'w2' ? 'selected' : ''}>每周二</option>
+      <option value="w3" ${rv2CycleValue(r.cycle) === 'w3' ? 'selected' : ''}>每周三</option>
+      <option value="w4" ${rv2CycleValue(r.cycle) === 'w4' ? 'selected' : ''}>每周四</option>
       <option value="w5" ${rv2CycleValue(r.cycle) === 'w5' ? 'selected' : ''}>每周五</option>
       <option value="w6" ${rv2CycleValue(r.cycle) === 'w6' ? 'selected' : ''}>每周六</option>
+      <option value="w7" ${rv2CycleValue(r.cycle) === 'w7' ? 'selected' : ''}>每周日</option>
     </select>
     <button class="btn btn-primary btn-full" onclick="rv2SaveRow('${rowId}')">保存</button>
   `;
