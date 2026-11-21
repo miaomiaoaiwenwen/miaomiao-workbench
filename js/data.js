@@ -13,6 +13,7 @@ const MENU_CATEGORIES = [
       { id: 'custlib', icon: '🗂️', name: '顾客资料库' },
       { id: 'revisit', icon: '🔁', name: '周期回访' },
       { id: 'consumption', icon: '💳', name: '成交记录' },
+      { id: 'recordings', icon: '🎙️', name: '录音归档' },
       { id: 'dashboard', icon: '📊', name: '数据台账' },
     ],
   },
