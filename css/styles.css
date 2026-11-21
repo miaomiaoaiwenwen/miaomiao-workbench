@@ -1326,3 +1326,16 @@ textarea.input-field { resize: none; min-height: 60px; line-height: 1.6; }
 .rv2-home-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; border-radius: 10px; background: #FFF7FA; margin-bottom: 6px; gap: 8px; }
 .rv2-home-item-overdue { background: #FFF3F4; border: 1px dashed #E57373; }
 .rv2-home-name { font-size: 13px; font-weight: 600; }
+
+
+
+/* ==================== rv2 资料库选人弹窗（独立新增样式） ==================== */
+.rv2-pick-list { max-height: 300px; overflow-y: auto; border: 1px solid #FBE4EC; border-radius: 12px; margin-bottom: 4px; }
+.rv2-pick-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #FDF1F5; cursor: pointer; }
+.rv2-pick-item:last-child { border-bottom: none; }
+.rv2-pick-check { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #F3CFDB; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: transparent; transition: all 0.15s; }
+.rv2-pick-item.selected .rv2-pick-check { background: #4CAF50; border-color: #4CAF50; color: #fff; }
+.rv2-pick-item.selected { background: #F2FBF3; }
+.rv2-pick-info { flex: 1; min-width: 0; }
+.rv2-pick-name { font-size: 14px; font-weight: 700; }
+.rv2-pick-note { font-size: 11px; color: var(--text-light); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
